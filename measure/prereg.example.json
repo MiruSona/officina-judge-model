@@ -1,0 +1,13 @@
+{
+ "written_at": "YYYY-MM-DD HH:MM:SS",
+ "model": {"name": "nli-studio-v1", "weights_sha256": "<64 hex>"},
+ "temperature": 1.0,
+ "nli_sure": 0.70,
+ "nli_sure_support": 0.90,
+ "sets": {
+  "game90": {"file": "<game90.jsonl>", "sha256": "<64 hex>", "once": true, "judge": true},
+  "k48": {"file": "<k48.jsonl>", "sha256": "<64 hex>", "once": false, "judge": false}
+ },
+ "criteria": {"accuracy_min": 0.85, "contradict_recall_min": 0.75, "false_support_max": 3, "unsure_max": 0.30, "p95_ms_max": 1000.0},
+ "next": {"pass": "…", "p95_only": "…", "fail": "…"}
+}

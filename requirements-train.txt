@@ -1,0 +1,9 @@
+# 기록용 — 실제로는 podman 이미지 · 있는 venv 를 쓰고 새로 깔지 않는다
+torch
+transformers
+safetensors
+tokenizers
+numpy
+onnx
+onnxscript
+onnxruntime

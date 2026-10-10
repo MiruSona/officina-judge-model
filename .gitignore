@@ -1,0 +1,16 @@
+runs/
+hf/
+data/
+models/
+export/
+logs/
+*.onnx
+*.safetensors
+*.pt
+__pycache__/
+venv*/
+.venv/
+*.bin
+*.gguf
+env.sh
+*.jsonl
