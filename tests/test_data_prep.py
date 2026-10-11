@@ -10,18 +10,45 @@ import helpers  # noqa: F401
 import data_prep as dp
 
 
+class StripTagsTest(unittest.TestCase):
+    def test_strips_line_head_tags_only(self):
+        self.assertEqual(dp.strip_tags("왜 : 스왑이 밀렸다"), "스왑이 밀렸다")
+        self.assertEqual(dp.strip_tags("  무엇을：문턱을 올렸다"), "문턱을 올렸다")
+        self.assertEqual(dp.strip_tags("정한 것 : A\n다음에 : B"), "A\nB")
+        # 줄 가운데 것 · 꼬리표 아닌 낱말은 그대로
+        self.assertEqual(dp.strip_tags("까닭은 왜 : 이다"), "까닭은 왜 : 이다")
+        self.assertEqual(dp.strip_tags("왜냐 : 그렇다"), "왜냐 : 그렇다")
+        self.assertEqual(dp.strip_tags("다음 판"), "다음 판")
+
+    def test_read_pairs_strips_mem_rows_not_public(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "pairs.jsonl")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"id": "m1", "evidence": "근거 : 가", "claim": "결론 : 나", "want": "support"},
+                                   ensure_ascii=False) + "\n")
+                f.write(json.dumps({"id": "p1", "premise": "왜 : 다", "hypothesis": "라", "label": 2, "src": "klue"},
+                                   ensure_ascii=False) + "\n")
+            rows = dp.read_pairs(path)
+        self.assertEqual((rows[0]["premise"], rows[0]["hypothesis"]), ("가", "나"))
+        self.assertEqual(rows[1]["premise"], "왜 : 다")
+        self.assertEqual(dp.text_pair({"evidence": "주의 : 가", "claim": "나"}), ("가", "나"))
+
+
 class LabelMapTest(unittest.TestCase):
     def test_klue_ids_follow_design_table(self):
         # 설계 2-3 : entailment(0)→A · contradiction(2)→B · neutral(1)→C
         self.assertEqual(dp.KLUE_ID_TO_LABEL, {0: 0, 2: 1, 1: 2})
-        self.assertEqual(dp.LABELS, ["support", "contradict", "unrelated"])
+        # 넷 확장 설계 1절 : a·b·c 차례는 그대로 두고 d 를 넷째에 붙인다
+        self.assertEqual(dp.LABELS, ["support", "contradict", "unrelated", "related"])
+        self.assertEqual(dp.LETTERS, ["a", "b", "c", "d"])
 
     def test_text_and_want_agree_with_klue(self):
         for text, klue_id in (("entailment", 0), ("contradiction", 2), ("neutral", 1)):
             self.assertEqual(dp.TEXT_TO_LABEL[text], dp.KLUE_ID_TO_LABEL[klue_id])
         for want, letter in (("support", "A"), ("contradict", "B"), ("unrelated", "C")):
             self.assertEqual(dp.want_label(want), dp.want_label(letter))
-        self.assertEqual(dp.SOURCE_LABELS, ["entailment", "contradiction", "neutral"])
+        # 공개 NLI 에는 d 에 맞는 원본 라벨이 없다
+        self.assertEqual(dp.SOURCE_LABELS, ["entailment", "contradiction", "neutral", None])
 
     def test_klue_record_forms(self):
         self.assertEqual(dp.klue_label({"gold_label": "neutral"}), 2)

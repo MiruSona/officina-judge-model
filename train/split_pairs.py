@@ -7,6 +7,8 @@
 쌍마다 `src_ids`(또는 `src` 를 + 로 가른 것)가 있어야 한다. 기억 하나라도 같이 쓰는 쌍은 한 덩이다.
 덩이를 섞어 dev 를 약 15% 뽑고, 갈래(want)별 dev 몫이 띠(13~17%) 안이고 반대 dev 가 40 이상일 때까지
 씨앗을 1씩 올려 다시 뽑는다. 결과는 train ∩ dev 기억 0 을 검사한 뒤에만 쓴다. 이 스크립트는 mem 경로를 모른다.
+갈래는 넷(a 지지 · b 반대 · c 무관 · d 비슷한 계열)이다. want `cd`(「c 나 d」, 라벨러가 못 고른 쌍)는
+dev 에 안 넣는다 — 그 쌍이 든 덩이는 늘 train 쪽이고 띠 검사에서도 뺀다 (판정 넷 확장 설계 1-1 · 3-3).
 """
 import argparse
 import collections
@@ -17,8 +19,10 @@ import random
 import sys
 
 
-# want 글자(a·b·c)도 이름으로 센다 — 반대 수(min_contradict)는 이름으로 본다
-WANT_NAMES = {"a": "support", "b": "contradict", "c": "unrelated"}
+# want 글자(a·b·c·d)도 이름으로 센다 — 반대 수(min_contradict)는 이름으로 본다
+WANT_NAMES = {"a": "support", "b": "contradict", "c": "unrelated", "d": "related"}
+# dev 에 안 넣는 want — train 에서만 합친 칸 손실로 쓴다
+TRAIN_ONLY_WANTS = frozenset({"cd"})
 
 
 def read_jsonl(path):
@@ -108,6 +112,8 @@ def try_split(rows, groups, seed, dev_frac, band, min_contradict, max_group, pin
     want_all = collections.Counter(want_name(row) for row in rows)
     want_dev = collections.Counter(want_name(rows[n]) for n in dev)
     for want, total in want_all.items():
+        if want in TRAIN_ONLY_WANTS:
+            continue
         share = want_dev[want] / total
         if share < band[0] or share > band[1]:
             return None
@@ -123,11 +129,16 @@ def pinned_rows(rows, pin_ids):
     return frozenset(n for n, row in enumerate(rows) if pin_ids.intersection(mem_ids(row)))
 
 
+def train_only_rows(rows):
+    """want 가 cd 같은 train 전용인 줄 번호. 그 덩이도 dev 로 못 간다."""
+    return frozenset(n for n, row in enumerate(rows) if want_name(row) in TRAIN_ONLY_WANTS)
+
+
 def split(rows, seed=1, dev_frac=0.15, band=(0.13, 0.17), min_contradict=40, max_tries=2000, pin_ids=frozenset()):
     """(train 줄, dev 줄, 쓴 씨앗, 큰 덩이 수). 못 가르면 SystemExit.
     pin_ids 기억을 쓰는 덩이는 늘 train 쪽에 둔다 (예 : blind 에 못 넣는 game90 기억)."""
     groups = make_groups(rows)
-    pinned = pinned_rows(rows, set(pin_ids))
+    pinned = pinned_rows(rows, set(pin_ids)) | train_only_rows(rows)
     max_group = int(len(rows) * dev_frac)
     big = sum(1 for g in groups if len(g) > max_group)
     for s in range(seed, seed + max_tries):
@@ -205,6 +216,9 @@ def main(argv=None):
     pinned_in_dev = [r["id"] for r in dev if pin_ids.intersection(mem_ids(r))]
     if pinned_in_dev:
         raise SystemExit(f"pin 기억을 쓰는 쌍이 dev 에 들어갔다 : {pinned_in_dev[:5]} — 쓰지 않는다")
+    train_only_in_dev = [r.get("id", "") for r in dev if want_name(r) in TRAIN_ONLY_WANTS]
+    if train_only_in_dev:
+        raise SystemExit(f"cd 쌍이 dev 에 들어갔다 : {train_only_in_dev[:5]} — 쓰지 않는다")
     shared = overlap(train, dev)
     if shared:
         raise SystemExit(f"train·dev 가 기억 {len(shared)}개를 같이 쓴다 — 쓰지 않는다")

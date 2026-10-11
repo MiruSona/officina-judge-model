@@ -5,6 +5,9 @@
 
 쌍별 줄 {"id", "label", "logits", "probs", "pred", "kind", "src"} 은 calibrate.py 의 입력이다.
 `--calibration` 을 주면 probs 에 그 온도를 건다 (logits 는 늘 온도 전 값).
+`--public-neutral` 은 학습 때 준 `--replay-neutral` 과 맞춘다 — 기본 cd(옛 동작). c 로 배운 모델은 c 로 채점한다.
+칸 수는 모델 머리에서 읽는다. label 은 그 모델이 배우는 목표(data_prep.train_target)다 — 4칸 모델에서
+공개 NLI 중립 · want `cd` 쌍은 -2(CD, 「c 나 d」)로 적는다. 라벨 없는 쌍은 null.
 """
 import argparse
 import json
@@ -18,8 +21,9 @@ sys.path.insert(0, os.path.dirname(HERE))
 import torch  # noqa: E402
 
 from calibrate import softmax  # noqa: E402
-from data_prep import LETTERS, read_pairs, sha256_file  # noqa: E402
-from train_nli import build_model, evaluate, load_tokenizer, metrics_from, tokenize  # noqa: E402
+from data_prep import LETTERS, PUBLIC_NEUTRAL_MODES, read_pairs, sha256_file  # noqa: E402
+from heads import argmax, eval_targets, metrics_from  # noqa: E402
+from train_nli import build_model, evaluate, load_tokenizer, tokenize  # noqa: E402
 
 
 def parse_args(argv=None):
@@ -33,6 +37,8 @@ def parse_args(argv=None):
     p.add_argument("--batch", type=int, default=32)
     p.add_argument("--threads", type=int, default=8)
     p.add_argument("--calibration", default="", help="calibration.json — probs 에 온도를 건다")
+    p.add_argument("--public-neutral", choices=list(PUBLIC_NEUTRAL_MODES), default="cd",
+                   help="4칸 모델에서 공개 NLI 중립을 채점할 칸 — 학습의 --replay-neutral 과 같게 (기본 cd)")
     return p.parse_args(argv)
 
 
@@ -46,30 +52,32 @@ def main(argv=None):
         with open(a.calibration, encoding="utf-8") as f:
             temperature = json.load(f)["temperature"]
     tokenizer = load_tokenizer(a.model)
-    model = build_model(a.model, a.device, False)
+    model = build_model(a.model, a.device)
+    n_labels = model.config.num_labels
     rows = read_pairs(a.pairs)
-    labeled = [r for r in rows if r.get("label") in (0, 1, 2)]
+    # 라벨을 이 모델의 목표로 바꾼다 (3칸이면 d·CD → c, 4칸이면 공개 중립 → CD 또는 c). 라벨 없는 줄은 None
+    targets = eval_targets(rows, n_labels, a.public_neutral)
+    labeled = [t for t in targets if t is not None]
     # 라벨 없는 쌍(길이만 재는 셋)도 확률은 낸다 — 평가 수치는 라벨 있는 쌍만
-    for_items = [dict(r, label=r["label"] if r.get("label") in (0, 1, 2) else 0) for r in rows]
-    items, truncated = tokenize(for_items, tokenizer.backend_tokenizer, a.max_len, None)
+    for_items = [dict(r, label=t if t is not None else 0) for r, t in zip(rows, targets)]
+    items, truncated = tokenize(for_items, tokenizer.backend_tokenizer, a.max_len, None, n_labels)
     _, logits = evaluate(model, items, a.batch, tokenizer.pad_token_id, a.device, a.dtype == "bf16", want_logits=True)
 
     os.makedirs(a.out_dir, exist_ok=True)
     pred_path = os.path.join(a.out_dir, "pred.jsonl")
     with open(pred_path, "w", encoding="utf-8", newline="\n") as f:
-        for r, lg in zip(rows, logits):
+        for r, t, lg in zip(rows, targets, logits):
             probs = softmax(lg, temperature)
-            label = r.get("label") if r.get("label") in (0, 1, 2) else None
-            f.write(json.dumps({"id": r.get("id", ""), "label": label, "logits": [round(x, 6) for x in lg],
-                                "probs": [round(x, 6) for x in probs],
-                                "pred": LETTERS[max(range(3), key=lambda i: lg[i])],
+            f.write(json.dumps({"id": r.get("id", ""), "label": t, "logits": [round(x, 6) for x in lg],
+                                "probs": [round(x, 6) for x in probs], "pred": LETTERS[argmax(lg)],
                                 "kind": r.get("kind", ""), "src": r.get("src", "")}, ensure_ascii=False) + "\n")
-    lab_idx = [i for i, r in enumerate(rows) if r.get("label") in (0, 1, 2)]
-    metrics = metrics_from([logits[i] for i in lab_idx], [rows[i]["label"] for i in lab_idx],
+    lab_idx = [i for i, t in enumerate(targets) if t is not None]
+    metrics = metrics_from([logits[i] for i in lab_idx], [targets[i] for i in lab_idx],
                            [rows[i].get("kind", "") for i in lab_idx])
-    summary = {"model": os.path.abspath(a.model), "pairs": os.path.basename(a.pairs),
+    summary = {"model": os.path.abspath(a.model), "labels": n_labels, "pairs": os.path.basename(a.pairs),
                "pairs_sha256": sha256_file(a.pairs), "rows": len(rows), "labeled": len(labeled),
-               "max_len": a.max_len, "truncated": truncated, "temperature": temperature, "metrics": metrics}
+               "max_len": a.max_len, "truncated": truncated, "temperature": temperature,
+               "public_neutral": a.public_neutral, "metrics": metrics}
     with open(os.path.join(a.out_dir, "summary.json"), "w", encoding="utf-8", newline="\n") as f:
         json.dump(summary, f, ensure_ascii=False, indent=1)
         f.write("\n")

@@ -3,6 +3,8 @@
 #
 #   run/cpu-train.sh [--name NAME] <src 기준 스크립트> [스크립트 인자...]
 #   예) run/cpu-train.sh --name base-cpu train/train_nli.py --device cpu --dtype fp32 --batch 16 --accum 2 ...
+#   넷 칸 연기 판 (판정 넷 확장) : run/cpu-train.sh --name smoke4 train/train_nli.py --smoke --grow-head 4 --out runs/smoke4
+#   넷 칸 덧학습은 podman-train.sh 머리 주석의 r2-01 줄에서 --device cpu --dtype fp32 로 바꿔 쓴다.
 #
 # 파이썬은 JT_VENV(기본 $JT_ROOT/venv · 기계별 값은 env.sh)의 것을 쓴다 — 새로 깔지 않는다. 작업 폴더는 JT_ROOT.
 # 메모리 상한 : systemd-run --user --scope -p MemoryMax=12G -p MemorySwapMax=0 nice -n 19 (설계 3-3).

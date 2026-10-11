@@ -8,7 +8,8 @@
         --body-name FacebookAI/xlm-roberta-large --body-weights hf/xlm-roberta-large/model.safetensors
 
 torch · transformers · onnx · onnxruntime 이 든 venv 에서 돈다. 입력은 input_ids · attention_mask(int64),
-출력은 logits [batch, 3] (온도 전). 몸통(klue roberta · XLM-R)은 type_vocab_size 1 이라 token_type_ids 를 안 넣는다 —
+출력은 logits [batch, 칸 수] (온도 전). 칸 수는 모델 머리에서 읽는다 — 3칸(`nli-v1` 꼴) · 4칸(`nli-v2` 꼴) 둘 다 내보내고,
+model.json 의 labels · letters · protocol · label_guide 를 그 칸 수에 맞춰 적는다 (판정 넷 확장 설계 2-2). 몸통(klue roberta · XLM-R)은 type_vocab_size 1 이라 token_type_ids 를 안 넣는다 —
 1 보다 크면 내보내지 않고 멈춘다 (pairenc.check_no_token_types).
 가중치가 2GB 를 넘으면(XLM-R large fp32 2.24GB) protobuf 한도 때문에 torch 가 가중치를 낱개 파일 수백 개로 흩뜨린다 —
 그때는 `model.onnx`(그래프) + `model.onnx.data`(가중치 한 파일) 둘로 모으고 model.json 에 둘의 SHA 를 다 적는다
@@ -27,11 +28,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "train"))
 
-from data_prep import LABELS, SOURCE_LABELS  # noqa: E402
+from data_prep import LABELS, LETTERS, SOURCE_LABELS  # noqa: E402
 from pairenc import check_no_token_types, pair_template  # noqa: E402
 
 OPSET = 17
 FORMAT = 1
+# 칸 수 → (응답 꼴 판 이름, 라벨 기준 글 판). 서버 · 손님이 이 이름으로 옛 판과 새 판을 가른다
+PROTOCOLS = {3: ("nli-v1", "support-v3"), 4: ("nli-v2", "support-v4")}
 ONNX_DATA = "model.onnx.data"
 TORCH_FILES = ("config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json",
                "special_tokens_map.json", "vocab.txt", "sentencepiece.bpe.model")
@@ -195,11 +198,16 @@ def data_section(train_info):
 
 
 def build_spec(a, weights_sha, onnx_sha, tok_sha, calibration, train_info, parent, body_sha, smoke_diff, pair="",
-               onnx_data_sha=None):
+               onnx_data_sha=None, num_labels=3):
     """model.json 내용. pair 는 쌍 꼴 글(pairenc.pair_template) — 비면 klue 꼴로 적는다(옛 판 호환).
 
     onnx_data_sha 는 가중치를 model.onnx.data 로 뗀 판에서만 준다 — 없으면 두 칸 다 null.
+    num_labels 는 모델 머리 칸 수다 (3 이나 4). labels · letters · source_labels 는 data_prep 표의 앞 그만큼이다.
     """
+    if num_labels not in PROTOCOLS:
+        raise SystemExit(f"머리 칸이 3 이나 4 가 아니다: {num_labels}")
+    protocol, guide = PROTOCOLS[num_labels]
+    guide = getattr(a, "label_guide", "") or guide
     data = data_section(train_info)
     nc = any(d["nc"] for d in data)
     private = any(d["private"] for d in data)
@@ -219,13 +227,15 @@ def build_spec(a, weights_sha, onnx_sha, tok_sha, calibration, train_info, paren
         "onnx_data_file": ONNX_DATA if onnx_data_sha else None, "onnx_data_sha256": onnx_data_sha,
         "input": {"pair": pair or "[CLS] evidence [SEP] claim [SEP]", "names": ["input_ids", "attention_mask"],
                   "max_len": max_len, "truncation": "only_first", "keep": "evidence head"},
-        "labels": LABELS, "letters": ["a", "b", "c"], "source_labels": SOURCE_LABELS,
+        "protocol": protocol, "label_guide": guide,
+        "labels": LABELS[:num_labels], "letters": LETTERS[:num_labels], "source_labels": SOURCE_LABELS[:num_labels],
         "calibration": {"temperature": (calibration or {}).get("temperature", 1.0),
                         "file": "calibration.json" if calibration else None},
         "data": data, "nc": nc, "private": private, "publishable": not nc and not private,
         "parent": {"name": parent["name"], "weights_sha256": parent["weights_sha256"]} if parent else None,
         "scores": {"thresholds": {"nli_sure": thresholds.get("nli_sure"),
-                                  "nli_sure_support": thresholds.get("nli_sure_support")},
+                                  "nli_sure_support": thresholds.get("nli_sure_support"),
+                                  **({"nli_sure_related": thresholds.get("nli_sure_related")} if num_labels > 3 else {})},
                    **(read_json(a.scores) or {})},
         "trained_at": time.strftime("%Y-%m-%d", time.localtime(os.path.getmtime(a.src_weights))),
         "run_id": (train_info or {}).get("run_id"),
@@ -250,6 +260,7 @@ def parse_args(argv=None):
     p.add_argument("--int8", action="store_true", help="동적 양자화 model.int8.onnx 도 만든다 (p95 가 넘을 때만)")
     p.add_argument("--with-torch", action="store_true", help="torch/ 에 HF 가중치를 같이 둔다 (serve --backend torch)")
     p.add_argument("--threads", type=int, default=8)
+    p.add_argument("--label-guide", default="", help="라벨 기준 글 판 (비면 3칸 support-v3 · 4칸 support-v4)")
     return p.parse_args(argv)
 
 
@@ -272,8 +283,9 @@ def main(argv=None):
     tokenizer.save_pretrained(os.path.join(out, "tokenizer"))
     model = AutoModelForSequenceClassification.from_pretrained(src).float().eval()
     check_no_token_types(model.config)
-    if model.config.num_labels != 3:
-        raise SystemExit(f"머리 칸이 3 이 아니다: {model.config.num_labels}")
+    num_labels = model.config.num_labels
+    if num_labels not in PROTOCOLS or num_labels > len(LABELS):
+        raise SystemExit(f"머리 칸이 3 이나 4 가 아니다: {num_labels}")
 
     onnx_path = os.path.join(out, "model.onnx")
     data_path = export_graph(model, onnx_path, a.opset, tokenizer.pad_token_id)
@@ -295,11 +307,12 @@ def main(argv=None):
                       sha256_of(os.path.join(out, "tokenizer", "tokenizer.json")),
                       calibration, read_json(a.train_info), parent, body_sha, diff,
                       pair=pair_template(tokenizer.backend_tokenizer),
-                      onnx_data_sha=sha256_of(data_path) if data_path else None)
+                      onnx_data_sha=sha256_of(data_path) if data_path else None, num_labels=num_labels)
     with open(os.path.join(out, "model.json"), "w", encoding="utf-8", newline="\n") as f:
         json.dump(spec, f, ensure_ascii=False, indent=1)
         f.write("\n")
-    print(f"model.json 씀 · {a.name} · 가중치 {spec['weights_sha256'][:8]} · T {spec['calibration']['temperature']} · "
+    print(f"model.json 씀 · {a.name} · {spec['protocol']} {''.join(spec['letters'])} · "
+          f"가중치 {spec['weights_sha256'][:8]} · T {spec['calibration']['temperature']} · "
           f"publishable {spec['publishable']}", flush=True)
 
 

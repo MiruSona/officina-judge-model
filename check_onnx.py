@@ -175,7 +175,7 @@ def main(argv=None):
         for r, p32 in zip(rows, probs_fp32):
             p8 = onnx8.probs(r["premise"], r["hypothesis"])
             same += 1 if argmax(p8) == argmax(p32) else 0
-            if r.get("label") in (0, 1, 2):
+            if r.get("label") in range(len(p32)):
                 graded += 1
                 hit32 += 1 if argmax(p32) == r["label"] else 0
                 hit8 += 1 if argmax(p8) == r["label"] else 0

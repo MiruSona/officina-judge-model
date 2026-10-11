@@ -4,6 +4,14 @@
 #   run/podman-train.sh [-e KEY=VAL]... [--name NAME] <src 기준 스크립트> [스크립트 인자...]
 #   예) run/podman-train.sh -e TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=0 --name base-2 \
 #           train/train_nli.py --device cuda --dtype bf16 --init hf/xlm-roberta-large ... --out runs/base-2
+#   넷 칸 덧학습 (nli-studio-v3, 판정 넷 확장 설계 3-3) — r1-04 처방 그대로에 --grow-head 4 만 더한다.
+#   기반은 3칸 runs/base-2/ckpt-best 그대로. train 쌍은 넷 라벨(a·b·c·d·cd) 판, replay 의 src 는 공개 출처 이름이어야
+#   중립이 합친 칸 손실(c∪d)로 간다 (로그 「replay 중립 … 중 합친 칸 손실」 줄로 확인) :
+#       run/podman-train.sh -e TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=0 -e HF_HUB_OFFLINE=1 --name r2-01 \
+#           train/train_nli.py --device cuda --dtype bf16 --init runs/base-2/ckpt-best --grow-head 4 --stage studio \
+#           --train mem/r2/train.jsonl --replay data/prep/replay-ko-en-r4.jsonl --mix-klue 1:1 --class-weight \
+#           --dev mem/r2/dev-r2.jsonl --out runs/r2-01 --epochs 4 --batch 16 --warmup 0.10 --eval-every 0 \
+#           --select last --collapse-acc 0 --max-len 320 --lr 1e-5 --seed 1
 #
 # 자리 : 호스트 ~/judgetool (JT_ROOT) 을 컨테이너 /work 로 붙이고 작업 폴더도 /work 다 — 상대 경로 인자는 JT_ROOT 기준.
 # 코드는 /work/src, 로그는 logs/<NAME>.log, 심장 박동 logs/<NAME>.heartbeat, 멈춤 파일 logs/<NAME>.stop.

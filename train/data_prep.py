@@ -12,7 +12,9 @@
                                   --set klue=data/prep/klue-train.jsonl --set k48=pairs.jsonl \
                                   --group base=klue,kornli --group serve=mem,k48,game90 --out lengths.json
 
-공통 줄 꼴 : {"id", "premise", "hypothesis", "label": 0|1|2, "src", "kind"?}. 칸 차례는 a·b·c 로 고정이고
+mem 쌍 꼴(evidence·claim)은 읽을 때 줄 머리의 본문 꼬리표(`왜 :` 따위, strip_tags)를 뗀다. 셋 파일은 안 고친다.
+공통 줄 꼴 : {"id", "premise", "hypothesis", "label": 0|1|2|3|-2, "src", "kind"?}. 칸 차례는 a·b·c·d 로 고정이고
+(-2 = CD, 「c 와 d 중 하나」)
 **라벨 바꿔 끼우기는 이 파일의 표(아래 상수)에서만 한다** (설계 2-3).
 비상업(NC) 자료는 받지 않는다 — KorNLI dev/test(XNLI 번역) · XNLI · ANLI 는 경로 이름으로 거른다.
 영어(MNLI · SNLI)는 학습 셋만 쓴다 — 이름에 dev·test 가 든 파일도 거른다. 라벨 `-`(사람 의견 갈림) 줄은 뺀다.
@@ -25,19 +27,30 @@ import json
 import math
 import os
 import random
+import re
 import sys
 
-# 출력 칸 차례 : 0 = A 지지 · 1 = B 반대 · 2 = C 무관 (서버 응답 a·b·c 와 같은 차례)
-LABELS = ["support", "contradict", "unrelated"]
-LETTERS = ["a", "b", "c"]
+# 출력 칸 차례 : 0 = A 지지 · 1 = B 반대 · 2 = C 무관 · 3 = D 비슷한 계열 (서버 응답 a·b·c·d 와 같은 차례).
+# 칸 수는 이 목록 길이다. 옛 3칸 모델은 앞 셋만 쓴다 (판정 넷 확장 설계 1절 · 5절).
+LABELS = ["support", "contradict", "unrelated", "related"]
+LETTERS = ["a", "b", "c", "d"]
+RELATED = 3
+# 「c 와 d 중 하나」(라벨러가 못 고른 쌍 · 공개 NLI 중립). 학습에서 합친 칸 손실 −log(p_c + p_d) 로 쓴다
+CD = -2
+CD_COLS = (2, 3)
 # KLUE-NLI 라벨 id (0 entailment · 1 neutral · 2 contradiction) → 출력 칸
 KLUE_ID_TO_LABEL = {0: 0, 2: 1, 1: 2}
 # 글 라벨 (KLUE gold_label · KorNLI gold_label) → 출력 칸
 TEXT_TO_LABEL = {"entailment": 0, "contradiction": 1, "neutral": 2}
 # mem 쌍 want (이름 또는 글자) → 출력 칸
-WANT_TO_LABEL = {"support": 0, "contradict": 1, "unrelated": 2, "a": 0, "b": 1, "c": 2}
-# model.json 에 적는 원본 매핑 (칸 차례대로)
-SOURCE_LABELS = ["entailment", "contradiction", "neutral"]
+WANT_TO_LABEL = {"support": 0, "contradict": 1, "unrelated": 2, "related": RELATED, "cd": CD,
+                 "a": 0, "b": 1, "c": 2, "d": RELATED}
+# model.json 에 적는 원본 매핑 (칸 차례대로). 공개 NLI 에는 d 에 맞는 라벨이 없다
+SOURCE_LABELS = ["entailment", "contradiction", "neutral", None]
+# 공개 NLI 원본이 쓰는 칸 (바퀴별 표본을 라벨마다 고르게 뽑을 때)
+SOURCE_CLASSES = [i for i, name in enumerate(SOURCE_LABELS) if name]
+# 공개 NLI 출처 — 4칸 학습에서 이 출처의 중립(2)은 c 가 아니라 c∪d 로 가르친다 (설계 3-3)
+PUBLIC_SRCS = frozenset({"klue", "kornli-mnli", "kornli-snli", "mnli", "snli"})
 
 # 자료 출처별 라이선스 · 비상업 여부 (train_info.json · model.json 의 data 칸)
 LICENSES = {
@@ -85,9 +98,50 @@ def sha256_file(path):
     return h.hexdigest()
 
 
+# mem 본문 꼬리표 — 쌍 문장 약 25% 가 「왜 :」·「무엇을 :」 같은 기억 본문 꼬리표로 시작한다 (2026-10-11).
+# 줄 머리에 붙은 것만 뗀다. 학습·평가·측정이 다 같이 떼고, 서빙 쪽 손님(AIMemoryTool 정렬 함수)도 같은 규칙으로 뗀다.
+# 이 낱말 목록·꼴을 바꾸면 README 「꼬리표 떼기」 절과 손님 쪽도 같이 바꾼다.
+TAG_WORDS = ("근거", "왜", "무엇을", "무엇", "이후", "다음에", "다음", "까닭", "내용", "결론", "주의", "정한 것",
+             "확인", "어떻게", "무엇이", "무슨 일이")
+# 머리 `^\s*` 가 앞 빈 줄의 줄바꿈까지 먹어 꼬리표 줄이 위로 당겨지는 것은 의도다 — 손님 Go `StripTags` 와 같다.
+TAG_RE = re.compile(r"^\s*(" + "|".join(TAG_WORDS) + r")\s*[:：]\s*", re.MULTILINE)
+
+
+def strip_tags(text):
+    """줄마다 머리의 mem 본문 꼬리표(`왜 :` 따위)를 뗀다. 줄 가운데 것은 안 건드린다."""
+    return TAG_RE.sub("", text)
+
+
 def want_label(want):
-    """mem 쌍 want → 칸 번호. 모르는 값이면 None."""
+    """mem 쌍 want → 칸 번호 (`cd` 는 CD). 모르는 값이면 None."""
     return WANT_TO_LABEL.get(str(want).strip().lower())
+
+
+def is_label(label):
+    """학습·평가에 쓸 수 있는 라벨인가 — 칸 번호(0~3) 또는 CD."""
+    return label == CD or label in range(len(LABELS))
+
+
+PUBLIC_NEUTRAL_MODES = ("cd", "c")
+
+
+def train_target(row, num_labels, public_neutral="cd"):
+    """줄 라벨 → num_labels 칸 모델이 배울 목표. 칸 번호 또는 CD (합친 칸 손실).
+
+    - 3칸 모델 : d 와 CD 는 c 로 접는다 (d 는 c 에서 갈라진 칸이다).
+    - 4칸 모델 : 공개 NLI 출처의 중립은 CD 로 바꾼다 — NLI 중립은 「같은 장면, 참·거짓 모름」이라 d 에 가깝고
+      우리 c 는 대부분 「다른 주제」다. 한 칸에 몰면 둘 중 하나를 틀리게 가르친다.
+      public_neutral="c" 면 공개 중립을 c 로 둔다 (넷칸 보강 R1 — d 는 우리 기억 d 로만 배운다).
+      want `cd` 줄(라벨이 이미 CD)은 이 값과 상관없이 CD 다.
+    """
+    if public_neutral not in PUBLIC_NEUTRAL_MODES:
+        raise ValueError(f"public_neutral 은 {PUBLIC_NEUTRAL_MODES} 중 하나다: {public_neutral!r}")
+    label = row["label"]
+    if num_labels <= RELATED:
+        return 2 if label in (RELATED, CD) else label
+    if label == 2 and row.get("src") in PUBLIC_SRCS and public_neutral == "cd":
+        return CD
+    return label
 
 
 def normalize(row):
@@ -96,7 +150,7 @@ def normalize(row):
         out = dict(row)
         out.setdefault("src", "unknown")
         return out
-    out = {"id": row.get("id", ""), "premise": row["evidence"], "hypothesis": row["claim"],
+    out = {"id": row.get("id", ""), "premise": strip_tags(row["evidence"]), "hypothesis": strip_tags(row["claim"]),
            "label": want_label(row.get("want", "")), "src": "mem"}
     if "kind" in row:
         out["kind"] = row["kind"]
@@ -226,10 +280,10 @@ def sample_kornli(by_src, per_epoch, epochs, seed, mnli_share=MNLI_SHARE):
 
 
 def sample_balanced(by_src, want, epochs, seed):
-    """출처별 want[src] 쌍씩, 그 안에서 라벨 1/3 씩, 바퀴끼리 겹침 없이 바퀴마다 줄 목록을 돌려준다."""
+    """출처별 want[src] 쌍씩, 그 안에서 원본 라벨(SOURCE_CLASSES) 1/3 씩, 바퀴끼리 겹침 없이 바퀴마다 줄 목록을 돌려준다."""
     pools = {}
     for src_i, src in enumerate(sorted(want)):
-        for label in range(3):
+        for label in SOURCE_CLASSES:
             pool = [r for r in by_src.get(src, []) if r["label"] == label]
             random.Random(seed * 100 + src_i * 10 + label).shuffle(pool)
             pools[(src, label)] = pool
@@ -237,7 +291,7 @@ def sample_balanced(by_src, want, epochs, seed):
     for epoch in range(epochs):
         rows = []
         for src in sorted(want):
-            for label, n in enumerate(split_quota(want[src], 3)):
+            for label, n in zip(SOURCE_CLASSES, split_quota(want[src], len(SOURCE_CLASSES))):
                 pool = pools[(src, label)]
                 start = epoch * n
                 if start + n > len(pool):
@@ -292,13 +346,13 @@ def load_tokenizer(path):
 def text_pair(row):
     if "premise" in row:
         return row["premise"], row["hypothesis"]
-    return row["evidence"], row["claim"]
+    return strip_tags(row["evidence"]), strip_tags(row["claim"])
 
 
 def cmd_klue(a):
     rows, dropped = convert_klue(a.inputs)
     write_jsonl(a.out, rows)
-    by_label = [sum(1 for r in rows if r["label"] == i) for i in range(3)]
+    by_label = [sum(1 for r in rows if r["label"] == i) for i in range(len(LABELS))]
     print(json.dumps({"out": a.out, "split": a.split, "rows": len(rows), "dropped_no_label": dropped,
                       "by_label": dict(zip(LABELS, by_label))}, ensure_ascii=False))
 
@@ -333,7 +387,7 @@ def cmd_english(a):
     rows, dropped = read_nli_jsonl(a.input, a.cmd)
     epochs_rows = sample_balanced({a.cmd: rows}, {a.cmd: a.per_epoch}, a.epochs, a.seed)
     list_path = write_epochs(a.out_dir, a.cmd, epochs_rows, {"seed": a.seed, "per_epoch": a.per_epoch})
-    by_label = [sum(1 for r in rows if r["label"] == i) for i in range(3)]
+    by_label = [sum(1 for r in rows if r["label"] == i) for i in range(len(LABELS))]
     print(json.dumps({"out_dir": a.out_dir, "epochs": len(epochs_rows), "per_epoch": a.per_epoch,
                       "pool": len(rows), "dropped": dropped, "by_label": dict(zip(LABELS, by_label)),
                       "sample_list": list_path}, ensure_ascii=False))
@@ -345,7 +399,7 @@ def cmd_eval_en(a):
     if a.limit:
         rows = rows[:a.limit]
     write_jsonl(a.out, rows)
-    by_label = [sum(1 for r in rows if r["label"] == i) for i in range(3)]
+    by_label = [sum(1 for r in rows if r["label"] == i) for i in range(len(LABELS))]
     print(json.dumps({"out": a.out, "src": a.src, "rows": len(rows), "dropped": dropped,
                       "by_label": dict(zip(LABELS, by_label)), "use": "eval only"}, ensure_ascii=False))
 

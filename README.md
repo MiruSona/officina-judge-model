@@ -7,6 +7,7 @@
 학습 · 측정 · 서빙(HTTP)을 이 폴더가 다 갖는다. 다른 툴은 HTTP 응답 꼴만 따른다.
 
 설계는 `Docs/Design/2026-10-09-길1한국어NLI분류기설계.md`.
+**판정 넷 확장(다음 판, 2026-10-10)** : 무관을 c 무관 · d 비슷한 계열로 쪼갠 네 칸 모델(`nli-v2`)과 양방향 접기 — 설계 `Docs/Design/2026-10-10-판정넷확장설계.md`, 라벨 기준 `Docs/Guide/라벨기준support-v4.md`. 학습 · 내보내기 · 서버 코드는 들어갔고(15 소단계), 네 칸 모델은 아직 없다.
 
 ## 상태 : 길 1 blind 통과 — 꽂힘 · 상시 (2026-10-09)
 
@@ -60,6 +61,25 @@ GET  /health → {"ok": true, "model": "...", "backend": "onnx", "name": "nli-st
 - 127.0.0.1 에만 붙는다 · 기본 포트 **8092** · 한 번에 한 판 · 몸통 1MB 상한(413) · 꼴이 틀리면 400.
 - 확률은 온도를 건 뒤 값이다. 확신 문턱(`nli_sure` · `nli_sure_support`)은 손님 쪽이 건다 — 출발값은 `model.json` 의 `scores.thresholds`.
 
+**네 칸 모델 (`nli-v2`, 판정 넷 확장)** — 서버는 `model.json` 의 칸 수를 읽어 꼴을 고른다. 옛 3칸 `model.json` 은 위 꼴 그대로 낸다.
+
+```
+POST /judge  → 200 {"a": 지지, "b": 반대, "c": 무관, "d": 비슷한 계열, "model": "...", "ms": 12.3}
+GET  /health → {..., "letters": ["a","b","c","d"], "protocol": "nli-v2"}
+```
+
+- `serve.py --compat3` : d 를 c 에 더해 옛 3칸 꼴(`nli-v1`)로 낸다. 네 칸 모델을 옛 손님에게 붙일 때 쓴다.
+- `model.json` 에 `labels` · `letters` · `protocol`(`nli-v1`/`nli-v2`) · `label_guide`(`support-v3`/`support-v4`)가 붙는다. 네 칸이면 문턱에 `nli_sure_related`(확신 d)가 더 있다.
+
+### 꼬리표 떼기 (손님과의 약속, 2026-10-11)
+
+mem 기억 본문은 `왜 :` · `무엇을 :` 같은 꼬리표로 줄을 시작하는 일이 많다(판정 셋 v3 쌍 문장의 약 25%). 꼬리표는 뜻이 없는 틀이라 **보내기 전에 뗀다.**
+
+- 규칙 : 줄마다 머리의 `^\s*(근거|왜|무엇을|무엇|이후|다음에|다음|까닭|내용|결론|주의|정한 것|확인|어떻게|무엇이|무슨 일이)\s*[:：]\s*` 를 지운다(여러 줄 모드). 줄 가운데 것은 안 건드린다.
+- 이 툴 안 : `train/data_prep.py` 의 `strip_tags` 한 곳. mem 쌍 꼴(evidence·claim)을 읽을 때 학습 · 평가 · `check_onnx` 가 떼고, `measure/run_measure.py` · `run_fold.py` 는 서버에 보내기 전에 뗀다. 셋 파일은 안 고친다(SHA 유지).
+- 서버(`serve.py`)는 안 뗀다. **손님(AIMemoryTool)도 보내기 전에 같은 규칙으로 뗀다(10-11 구현, Go `StripTags`).** 낱말 목록·꼴을 바꾸면 두 쪽을 같이 바꾼다.
+- 머리의 `^\s*` 가 앞 빈 줄의 줄바꿈까지 먹는 것은 의도다 — 손님 `StripTags` 도 같게 동작한다.
+
 ## 세 자리
 
 | 자리 | 무엇 | 어디 |
@@ -92,11 +112,12 @@ python -I serve.py --model ~/.judgemodel/models/nli-studio-v1 --port 8092 --thre
 | `serve.py` | 판정 서버 |
 | `export_onnx.py` · `check_onnx.py` | ONNX 내보내기 · `model.json` 쓰기 / 토큰·확률·p95·int8 일치 검사 |
 | `train/data_prep.py` | KLUE-NLI · KorNLI · MNLI · SNLI 원본 → 공통 jsonl · 바퀴별 표본 · 토큰 길이 재기(`measure`). **라벨 매핑은 여기 한 곳** |
-| `train/train_nli.py` | 학습 고리 (기반 · 덧학습 공용 · `--smoke`) |
+| `train/train_nli.py` | 학습 고리 (기반 · 덧학습 공용 · `--smoke` · 네 칸으로 머리 늘리기 `--grow-head 4`) |
+| `train/heads.py` | torch 없이 도는 칸 계산 (클래스 가중치 · 평가 지표 · 합친 칸 손실 기준값) |
 | `train/eval_nli.py` · `train/calibrate.py` | 평가(쌍별 로짓) · 온도와 문턱 둘 |
 | `train/split_pairs.py` | 쌍을 기억 덩이 단위로 train/dev 가르기 |
 | `train/freeze.py` · `train/bench.py` | 판정 셋 얼리기 · GPU 벤치 |
-| `measure/` | `prereg.py`(사전 등록) · `run_measure.py`(모델 표 · 사다리 표 · p95) |
+| `measure/` | `prereg.py`(사전 등록) · `run_measure.py`(모델 표 · 사다리 표 · p95) · `run_fold.py`(fold40 접기 오판, 네 칸) |
 | `run/` | 미니PC 감싸개 `podman-train.sh`(GPU) · `cpu-train.sh`(CPU) · 감시 고리 `watch-lib.sh` |
 | `run/serve-studio.ps1` | 메인 PC 판정 서버 띄우기 · 로그온 작업 등록(`-Register`)·해제(`-Unregister`) |
 | `tests/` | 내려받기 없이 도는 시험 |
@@ -120,6 +141,20 @@ python -I serve.py --model ~/.judgemodel/models/nli-studio-v1 --port 8092 --thre
 
 명령마다 인자는 각 파일 머리 주석에 있다.
 
+**네 칸 덧학습 (`nli-studio-v3`, 판정 넷 확장)** — 위 4단계에 `--grow-head 4` 만 더한다. 3칸 `runs/base-2/ckpt-best` 의 a·b·c 줄을 그대로 옮기고 d 줄은 c 줄 + 작은 잡음으로 시작한다.
+
+- train 쌍은 `support-v4` 라벨(a·b·c·d · 못 고른 `cd`). `cd` 쌍과 replay 의 공개 NLI 중립은 「c 또는 d」로 가르친다 — 손실 −log(p_c+p_d). replay 의 `src` 가 공개 출처 이름(klue · kornli-* · mnli · snli)이어야 이렇게 간다. 로그의 「replay 중립 … 합친 칸 손실」 줄로 확인한다.
+- `calibrate.py` 는 네 칸이면 확신 거짓 지지 몫을 2% → 1% 로 조이고, `nli_sure_related` 를 dev 확신 d 정밀도 ≥ 0.80 인 가장 작은 값(0.50~0.99)으로 고른다.
+- 측정 자는 `measure/prereg-v2.example.json`. blind 는 `run_measure.py`, fold40 은 `run_fold.py` 로 잰다.
+- 명령 줄 보기는 `run/podman-train.sh` 머리 주석의 r2-01 줄.
+
+| 사용법 | 하는 일 |
+| --- | --- |
+| `train/soup.py --out <폴더> <검사점> <검사점> …` | 같은 시작에서 갈라진 검사점들의 가중치를 단순 평균해 새 검사점으로 (model soup). 원본 목록은 `soup.json` |
+| `train_nli.py --save-every-epoch` | 바퀴 끝마다 `ckpt-e<N>` 을 따로 남긴다 — 바퀴별로 따로 재거나 soup 재료로 쓴다 |
+| `train_nli.py --replay-neutral {cd,c}` | 네 칸 학습에서 replay 공개 중립을 무엇으로 배우나. `cd` = 「c 또는 d」 합친 칸(기본) · `c` = c 로 고정 |
+| `eval_nli.py --public-neutral {cd,c}` | 공개 중립을 채점할 칸. 학습의 `--replay-neutral` 과 같게 준다(기본 `cd`) |
+
 ### 감시와 멈춤
 
 | 조건 | 누가 보나 | 처리 |
@@ -138,7 +173,7 @@ python -m unittest discover -s tests          # pytest 로도 돈다
 
 torch · transformers 가 없으면 `--smoke` 와 학습 조각 시험은 건너뛴다. `tokenizers` 가 없으면 쌍 인코딩 시험도 건너뛴다.
 
-메인 PC 에서는 onnxruntime · tokenizers 가 든 venv(`venv-serve`)로 돌리면 99 판 중 건너뜀 12 다 (2026-10-09 리뷰 수정 뒤). `JUDGEMODEL_TEST_MODEL=<모델 폴더>` 를 주면 실제 모델 시험까지 돌아 건너뜀이 하나 준다. 메인 PC 에는 torch 가 든 venv 가 없어 학습 조각 시험은 미니PC 에서만 돈다.
+메인 PC 에서는 onnxruntime · tokenizers 가 든 venv(`venv-serve`)로 돌리면 143 판 중 건너뜀 16 이다 (2026-10-10 판정 넷 확장 뒤). `JUDGEMODEL_TEST_MODEL=<모델 폴더>` 를 주면 실제 모델 시험까지 돌아 건너뜀이 하나 준다. 메인 PC 에는 torch 가 든 venv 가 없어 학습 조각 시험은 미니PC 에서만 돈다.
 
 ## 라이선스
 

@@ -1,4 +1,4 @@
-"""한국어 NLI 3갈래 분류기 학습 고리 — 기반 학습과 덧학습 공용 (설계 3절 · 4절).
+"""한국어 NLI 분류기 학습 고리 — 기반 학습과 덧학습 공용 (설계 3절 · 4절 · 판정 넷 확장 설계 3-3).
 
     # 기반 학습 (nli-base-v1)
     python -I train_nli.py --device cuda --dtype bf16 --init /work/hf/xlm-roberta-large \
@@ -10,8 +10,15 @@
         --train mem/train.jsonl --replay data/prep/klue-train.jsonl --mix-klue 1:1 --class-weight \
         --dev mem/dev.jsonl --out runs/studio-1 --epochs 4 --batch 16 --warmup 0.10 --eval-every 0 \
         --select last --collapse-acc 0 --max-len 256
-    # 스크립트가 끝까지 도는지만 (내려받기 없음 · 무작위 초기화 작은 모델 · CPU)
+    # 넷 칸 덧학습 (nli-studio-v3) — 3칸 기반의 머리를 넷으로 늘린다. 처방은 r1-04 그대로
+    python -I train_nli.py --device cuda --dtype bf16 --init runs/base-2/ckpt-best --grow-head 4 --stage studio \
+        --train mem/train.jsonl --replay data/prep/klue-train.jsonl --mix-klue 1:1 --class-weight \
+        --dev mem/dev.jsonl --out runs/r2-01 --epochs 4 --batch 16 --warmup 0.10 --eval-every 0 --max-len 320
+    # 스크립트가 끝까지 도는지만 (내려받기 없음 · 무작위 초기화 작은 모델 · CPU). --grow-head 4 를 붙이면 넷 칸 판
     python -I train_nli.py --smoke --out <임시 폴더>
+
+칸 수 : --grow-head N 이면 N, --resume 이면 검사점 그대로, 아니면 --num-labels (기본 3).
+4칸 학습에서 공개 NLI 중립과 want `cd` 쌍은 합친 칸 손실 −log(p_c + p_d) 로 배운다 (data_prep.train_target).
 
 datasets · accelerate 없이 torch 와 transformers(AutoTokenizer · AutoModelForSequenceClassification)만 쓴다.
 멈춤 : NaN·inf 3 연속 → nan · 스왑 +256MB → swap · 멈춤 파일(JT_STOP_FILE) → 그 안의 까닭.
@@ -34,7 +41,11 @@ sys.path.insert(0, os.path.dirname(HERE))
 
 import torch  # noqa: E402
 
-from data_prep import LABELS, LETTERS, LICENSES, SOURCE_LABELS, read_pairs, sha256_file  # noqa: E402
+from data_prep import (CD, CD_COLS, LABELS, LICENSES, SOURCE_LABELS, is_label, read_pairs,  # noqa: E402
+                       sha256_file, train_target)
+# class_weights · metrics_from 은 torch 없이 도는 heads 에 있다 (eval_nli · 시험이 여기서도 부른다)
+from heads import (class_weights, epoch_end_metrics, metrics_from, min_recall, parse_weight_scale,  # noqa: E402,F401
+                   row_weight, scale_weights)
 from pairenc import check_no_token_types, encode_pair  # noqa: E402
 
 EXIT_GUARD = 3        # 멈춤 파일 · 스왑 — 검사점 저장 뒤 멈춤
@@ -46,6 +57,7 @@ LOG_EVERY = 20
 MIB = 1024 * 1024
 SMOKE_ROWS = 64
 SMOKE_MAX_LEN = 64
+GROW_NOISE = 0.01     # --grow-head : 새 d 줄 = c 줄 + 이 표준편차의 잡음 (c 줄 크기에 견줘 작게)
 
 _log_file = None
 
@@ -77,13 +89,22 @@ def parse_args(argv=None):
     p.add_argument("--dtype", choices=["bf16", "fp32"], default="bf16", help="bf16 은 autocast (가중치·옵티마이저 fp32)")
     p.add_argument("--init", default="", help="시작 모델 폴더 또는 HF id (xlm-roberta-large · 앞 판 ckpt-best)")
     p.add_argument("--new-head", action="store_true", help="머리 칸 수가 다른 모델에서 머리만 새로 (지름길)")
+    p.add_argument("--num-labels", type=int, default=3, help="머리 칸 수 (--grow-head · --resume 이면 안 씀)")
+    p.add_argument("--grow-head", type=int, default=0,
+                   help="머리를 이 칸 수로 늘린다 — 기반의 a·b·c 줄은 그대로, 새 d 줄은 c 줄 + 작은 잡음")
     p.add_argument("--stage", choices=["base", "studio"], default="base")
     p.add_argument("--train", action="append", default=[], help="바퀴마다 다 쓰는 쌍 jsonl (여러 번)")
     p.add_argument("--train-epoch", action="append", default=[],
                    help="바퀴마다 다른 파일 — {epoch} 자리에 1부터 바퀴 번호 (KorNLI 표본)")
     p.add_argument("--replay", default="", help="잊음 막기 replay 풀 (KLUE 학습 jsonl)")
     p.add_argument("--mix-klue", default="1:1", help="--train 쌍 : replay 쌍 비율 (2:1 = replay 를 반으로)")
+    p.add_argument("--replay-neutral", choices=["cd", "c"], default="cd",
+                   help="4칸 학습에서 replay 의 공개 출처 중립을 무엇으로 배우나 — cd = 합친 칸 손실(옛 동작) · "
+                        "c = c 로 고정 (넷칸 보강 R1). --train 쪽 want `cd` 줄은 그대로 합친 칸")
     p.add_argument("--class-weight", action="store_true", help="mem 쌍에만 갈래 수의 역수 가중 (있는 갈래들의 가중치 단순 평균 1)")
+    p.add_argument("--class-weight-scale", default="",
+                   help="갈래 가중에 곱할 칸별 배수 (예 b=1.2 · a=1.0,b=1.2) — 곱한 뒤 평균 1 로 다시 맞춘다. "
+                        "--class-weight 와 같이 (설계 8절 「b 를 1.2 로 한 번만」)")
     p.add_argument("--dev", default="", help="평가 셋 jsonl")
     p.add_argument("--dev-limit", type=int, default=3000)
     p.add_argument("--out", required=True, help="판 폴더 runs/<run_id>")
@@ -103,6 +124,8 @@ def parse_args(argv=None):
     p.add_argument("--eval-every", type=int, default=2000, help="스텝마다 dev (0 = 바퀴 끝만)")
     p.add_argument("--ckpt-every", type=int, default=1000)
     p.add_argument("--ckpt-minutes", type=float, default=20)
+    p.add_argument("--save-every-epoch", action="store_true",
+                   help="바퀴 끝마다 가중치를 ckpt-e<N> 로 따로 남긴다 (바퀴별로 따로 재 보려고 · 판마다 모델 크기 × 바퀴 수)")
     p.add_argument("--select", choices=["base", "studio", "last"], default=None,
                    help="ckpt-best 고르기. base = dev 정확도 최고 · studio = 거짓 지지 최소 → 갈래 재현 최저값 최고 "
                         "(덜 배운 바퀴가 유리한 함정 — better() 참고) · last = 마지막 바퀴. "
@@ -118,6 +141,16 @@ def parse_args(argv=None):
                    help="이 파일이 생기면 검사점 저장 뒤 멈춘다 (감싸개가 게임 서버·메모리를 보고 쓴다)")
     p.add_argument("--run-id", default="")
     args = p.parse_args(argv)
+    if args.grow_head and args.new_head:
+        p.error("--grow-head 와 --new-head 는 같이 못 쓴다")
+    if args.grow_head > len(LABELS) or args.num_labels > len(LABELS):
+        p.error(f"머리 칸은 {len(LABELS)} 칸까지다")
+    try:
+        args.weight_scale = parse_weight_scale(args.class_weight_scale)
+    except ValueError as e:
+        p.error(f"--class-weight-scale : {e}")
+    if args.weight_scale and not args.class_weight:
+        p.error("--class-weight-scale 는 --class-weight 와 같이 쓴다")
     if args.select is None:
         args.select = "last" if args.stage == "studio" else "base"
     return args
@@ -126,9 +159,9 @@ def parse_args(argv=None):
 # ---------------------------------------------------------------- 자료
 
 def load_rows(path):
-    """라벨 없는 줄은 버린다. (줄, 버린 수)."""
+    """라벨 없는 줄은 버린다. (줄, 버린 수). 라벨은 원래 값 그대로다 — 칸 수에 맞추는 것은 tokenize 가 한다."""
     rows = read_pairs(path)
-    kept = [r for r in rows if r.get("label") in (0, 1, 2)]
+    kept = [r for r in rows if is_label(r.get("label"))]
     return kept, len(rows) - len(kept)
 
 
@@ -144,34 +177,18 @@ def replay_count(args, n_main):
     return int(round(n_main * replay_part / main_part))
 
 
-def class_weights(rows):
-    """mem 쌍 갈래 수의 역수로 만든 [wa, wb, wc].
-
-    「갈래 평균 1」 = mem 쌍이 하나라도 있는 갈래들의 가중치를 단순 평균하면 1 이다 (쌍 수로 가중한 평균이 아니다).
-    mem 쌍이 없는 갈래는 0 이고 평균에서 뺀다. mem 쌍이 아예 없으면 모두 1.
-    """
-    counts = [0, 0, 0]
-    for r in rows:
-        if r["src"] == "mem":
-            counts[r["label"]] += 1
-    present = [c for c in counts if c]
-    if not present:
-        return [1.0, 1.0, 1.0]
-    inv = [1.0 / c if c else 0.0 for c in counts]
-    mean = sum(inv) / len(present)
-    return [w / mean for w in inv]
+def targeted(rows, num_labels, public_neutral="cd"):
+    """줄마다 라벨을 num_labels 칸 모델의 목표로 바꾼 사본 (data_prep.train_target)."""
+    return [dict(r, label=train_target(r, num_labels, public_neutral)) for r in rows]
 
 
-def tokenize(rows, backend, max_len, weights):
-    """줄 → 학습 항목 [(ids, label, 가중, kind)] · 잘린 쌍 수."""
+def tokenize(rows, backend, max_len, weights, num_labels=3, public_neutral="cd"):
+    """줄 → 학습 항목 [(ids, 목표, 가중, kind)] · 잘린 쌍 수. 목표는 칸 번호 또는 CD."""
     items, truncated = [], 0
-    for r in rows:
+    for r in targeted(rows, num_labels, public_neutral):
         ids, cut = encode_pair(backend, r["premise"], r["hypothesis"], max_len)
         truncated += 1 if cut else 0
-        w = 1.0
-        if weights is not None and r["src"] == "mem":
-            w = weights[r["label"]]
-        items.append((ids, r["label"], w, r.get("kind", "")))
+        items.append((ids, r["label"], row_weight(weights, r), r.get("kind", "")))
     return items, truncated
 
 
@@ -204,7 +221,8 @@ def collate(items, idxs, pad_id, device):
 
 
 def data_entry(path, rows, truncated):
-    by_label = {LABELS[i]: sum(1 for r in rows if r["label"] == i) for i in range(3)}
+    by_label = {LABELS[i]: sum(1 for r in rows if r["label"] == i) for i in range(len(LABELS))}
+    by_label["cd"] = sum(1 for r in rows if r["label"] == CD)
     by_src = {}
     for r in rows:
         by_src[r["src"]] = by_src.get(r["src"], 0) + 1
@@ -216,14 +234,76 @@ def data_entry(path, rows, truncated):
 
 # ---------------------------------------------------------------- 모델
 
-def build_model(init, device, new_head):
+def label_maps(n):
+    names = LABELS[:n]
+    return dict(enumerate(names)), {name: i for i, name in enumerate(names)}
+
+
+def build_model(init, device, new_head=False, num_labels=None, grow_to=0, seed=0):
+    """모델을 읽는다. num_labels 가 None 이면 init 의 머리 그대로 (평가 · 재개).
+
+    grow_to 를 주면 init 의 머리(칸이 더 적어야 한다)를 그 칸 수로 늘린다 — grow_head 참고.
+    """
     from transformers import AutoModelForSequenceClassification
 
-    model = AutoModelForSequenceClassification.from_pretrained(
-        init, num_labels=3, ignore_mismatched_sizes=new_head,
-        id2label=dict(enumerate(LABELS)), label2id={n: i for i, n in enumerate(LABELS)})
+    if grow_to:
+        model = AutoModelForSequenceClassification.from_pretrained(init)
+        grow_head(model, grow_to, seed)
+    elif num_labels is None:
+        model = AutoModelForSequenceClassification.from_pretrained(init)
+    else:
+        id2label, label2id = label_maps(num_labels)
+        model = AutoModelForSequenceClassification.from_pretrained(
+            init, num_labels=num_labels, ignore_mismatched_sizes=new_head, id2label=id2label, label2id=label2id)
+    if model.config.num_labels > len(LABELS):
+        raise SystemExit(f"머리 칸 {model.config.num_labels} 이 라벨 수 {len(LABELS)} 보다 많다")
     check_no_token_types(model.config)
     return model.to(device)
+
+
+def head_layer(model):
+    """(머리 모듈, 로짓을 내는 마지막 Linear). roberta · xlm-r 는 classifier.out_proj, 그 밖은 classifier 자체."""
+    classifier = getattr(model, "classifier", None)
+    layer = getattr(classifier, "out_proj", classifier)
+    if not isinstance(layer, torch.nn.Linear):
+        raise SystemExit(f"머리 층을 못 찾았다: {type(classifier).__name__} — --new-head 를 쓴다")
+    return classifier, layer
+
+
+def grow_head(model, n, seed=0, noise=GROW_NOISE):
+    """머리를 n 칸으로 늘린다 (설계 3-3 「머리 늘리기」).
+
+    있던 줄(a·b·c)의 가중치·편향은 그대로 복사하고, 새 줄은 c 줄(셋째) + 표준편차 noise 의 잡음으로 시작한다.
+    d 는 c 에서 갈라져 나온 칸이라 c 에서 시작하는 것이 가깝다. 잡음이 없으면 c·d 가 같은 값에서 못 벗어난다.
+    편향은 c 와 같게 둔다 — 시작 때 c·d 확률이 거의 반씩이고, a·b 확률은 그대로라 옛 일을 안 흔든다.
+    """
+    classifier, old = head_layer(model)
+    have = old.out_features
+    if have >= n:
+        raise SystemExit(f"--grow-head {n} : 시작 모델 머리가 이미 {have} 칸이다")
+    if have < 3:
+        raise SystemExit(f"--grow-head : 시작 모델 머리가 {have} 칸이다 (a·b·c 셋이 있어야 한다)")
+    gen = torch.Generator().manual_seed(seed)
+    new = torch.nn.Linear(old.in_features, n, bias=old.bias is not None)
+    with torch.no_grad():
+        weight = old.weight.detach().float().cpu()
+        new.weight[:have] = weight
+        for row in range(have, n):
+            new.weight[row] = weight[2] + noise * torch.randn(old.in_features, generator=gen)
+        if old.bias is not None:
+            bias = old.bias.detach().float().cpu()
+            new.bias[:have] = bias
+            new.bias[have:] = bias[2]
+    new = new.to(dtype=old.weight.dtype, device=old.weight.device)
+    if classifier is old:
+        model.classifier = new
+    else:
+        classifier.out_proj = new
+    id2label, label2id = label_maps(n)
+    model.config.num_labels = n
+    model.config.id2label, model.config.label2id = id2label, label2id
+    model.num_labels = n
+    return model
 
 
 def load_tokenizer(init):
@@ -258,16 +338,27 @@ def make_scheduler(optimizer, total_steps, warmup_share):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
 
 
+def nli_losses(logits, labels):
+    """쌍마다 손실. 보통 라벨은 교차 엔트로피, CD 는 합친 칸 손실 −log(p_c + p_d) (heads.nll_ref 와 같은 셈).
+
+    3칸 로짓이면 합친 칸은 c 하나라 CD 는 −log p_c 다 (tokenize 가 3칸에선 CD 를 c 로 미리 바꾸기도 한다).
+    """
+    logp = torch.nn.functional.log_softmax(logits.float(), dim=-1)
+    picked = logp.gather(1, labels.clamp(min=0).unsqueeze(1)).squeeze(1)
+    cols = [i for i in CD_COLS if i < logits.shape[-1]]
+    cd_logp = torch.logsumexp(logp[:, cols], dim=-1)
+    return -torch.where(labels == CD, cd_logp, picked)
+
+
 def forward_loss(model, batch, device, use_bf16):
     ids, mask, labels, weights = batch
     with torch.autocast(device_type=device, dtype=torch.bfloat16, enabled=use_bf16):
         logits = model(input_ids=ids, attention_mask=mask).logits
-    losses = torch.nn.functional.cross_entropy(logits.float(), labels, reduction="none")
-    return (losses * weights).mean()
+    return (nli_losses(logits, labels) * weights).mean()
 
 
 def evaluate(model, items, batch, pad_id, device, use_bf16, want_logits=False):
-    """정확도 · 갈래별 재현 · 거짓 지지(정답 B·C 를 A 로) · 혼동표[정답][예측] · 평균 손실 · 지지 kind 별 재현."""
+    """정확도 · 갈래별 재현 · 거짓 지지 · 혼동표 · 3칸 접은 정확도 · 평균 손실 · 지지 kind 별 재현 (heads.metrics_from)."""
     model.eval()
     order = sorted(range(len(items)), key=lambda i: len(items[i][0]))
     logits_by = [None] * len(items)
@@ -278,7 +369,7 @@ def evaluate(model, items, batch, pad_id, device, use_bf16, want_logits=False):
             ids, mask, labels, _ = collate(items, idxs, pad_id, device)
             with torch.autocast(device_type=device, dtype=torch.bfloat16, enabled=use_bf16):
                 logits = model(input_ids=ids, attention_mask=mask).logits.float()
-            loss_sum += torch.nn.functional.cross_entropy(logits, labels, reduction="sum").item()
+            loss_sum += nli_losses(logits, labels).sum().item()
             for k, i in enumerate(idxs):
                 logits_by[i] = logits[k].tolist()
     model.train()
@@ -287,27 +378,6 @@ def evaluate(model, items, batch, pad_id, device, use_bf16, want_logits=False):
     if want_logits:
         return metrics, logits_by
     return metrics
-
-
-def metrics_from(logits, labels, kinds):
-    confusion = [[0, 0, 0] for _ in range(3)]
-    for lg, gold in zip(logits, labels):
-        pred = max(range(3), key=lambda i: lg[i])
-        confusion[gold][pred] += 1
-    n = max(1, len(labels))
-    recall = {}
-    for i in range(3):
-        total = sum(confusion[i])
-        recall[LETTERS[i]] = round(confusion[i][i] / total, 4) if total else None
-    by_kind = {}
-    for lg, gold, kind in zip(logits, labels, kinds):
-        if gold != 0 or not kind:
-            continue
-        hit, total = by_kind.get(kind, (0, 0))
-        by_kind[kind] = (hit + (1 if max(range(3), key=lambda i: lg[i]) == 0 else 0), total + 1)
-    return {"n": len(labels), "acc": round(sum(confusion[i][i] for i in range(3)) / n, 4), "recall": recall,
-            "false_support": confusion[1][0] + confusion[2][0], "confusion": confusion,
-            "support_recall_by_kind": {k: round(h / t, 4) for k, (h, t) in sorted(by_kind.items())}}
 
 
 def better(select, new, old):
@@ -322,9 +392,7 @@ def better(select, new, old):
         return True
     if select == "base":
         return new["acc"] > old["acc"]
-    new_min = min(v for v in new["recall"].values() if v is not None)
-    old_min = min(v for v in old["recall"].values() if v is not None)
-    return (-new["false_support"], new_min) > (-old["false_support"], old_min)
+    return (-new["false_support"], min_recall(new["recall"])) > (-old["false_support"], min_recall(old["recall"]))
 
 
 # ---------------------------------------------------------------- 검사점 · 기록
@@ -497,7 +565,13 @@ class Run:
         self.tokenizer = load_tokenizer(init)
         self.backend = self.tokenizer.backend_tokenizer
         self.pad_id = self.tokenizer.pad_token_id
-        self.model = build_model(init, self.device, args.new_head and not args.resume)
+        if args.resume:
+            self.model = build_model(init, self.device)
+        elif args.grow_head:
+            self.model = build_model(init, self.device, grow_to=args.grow_head, seed=seed)
+        else:
+            self.model = build_model(init, self.device, args.new_head, num_labels=args.num_labels)
+        self.num_labels = self.model.config.num_labels
         self.model.train()
         self.load_data()
         state = {"epoch": 0, "micro": 0, "step": 0, "seed": seed, "lr": lr, "restarts": restarts,
@@ -529,21 +603,43 @@ class Run:
             self.data.append((path, rows))
         self.weights = None
         if args.class_weight:
-            self.weights = class_weights(self.main_rows)
+            self.weights = class_weights(targeted(self.main_rows, self.num_labels), self.num_labels)
+            if args.weight_scale:
+                self.weights = scale_weights(self.weights, args.weight_scale)
+                log(f"갈래 가중 배수 {args.class_weight_scale} → {[round(w, 4) for w in self.weights]}")
         self.main_items, self.truncated = [], {}
         for path, rows in self.data:
-            items, cut = tokenize(rows, self.backend, args.max_len, self.weights)
+            items, cut = tokenize(rows, self.backend, args.max_len, self.weights, self.num_labels)
             self.main_items.extend(items)
             self.truncated[os.path.basename(path)] = cut
         self.replay_pool = []
         if args.replay:
             self.replay_pool, dropped = load_rows(args.replay)
             self.dropped += dropped
+            self.check_replay_neutral()
         self.dev_items = []
         if args.dev:
             dev_rows, _ = load_rows(args.dev)
             dev_rows = dev_rows[:args.dev_limit]
-            self.dev_items, self.truncated["_dev"] = tokenize(dev_rows, self.backend, args.max_len, None)
+            self.dev_items, self.truncated["_dev"] = tokenize(dev_rows, self.backend, args.max_len, None,
+                                                              self.num_labels)
+
+    def check_replay_neutral(self):
+        """4칸 학습이면 replay 중립이 합친 칸 손실로 가는지 센다.
+
+        CD 로 바뀌는 것은 src 가 공개 출처 이름(data_prep.PUBLIC_SRCS)인 줄뿐이다. 손으로 합친 replay 파일의 src 가
+        다른 이름이면 중립이 c 로만 배워진다 — 그때는 로그에 크게 남긴다 (멈추지는 않는다).
+        """
+        if self.num_labels <= 3:
+            return
+        neutral = sum(1 for r in self.replay_pool if r["label"] == 2)
+        mode = self.args.replay_neutral
+        merged = sum(1 for r in targeted(self.replay_pool, self.num_labels, mode) if r["label"] == CD)
+        log(f"replay 중립 {neutral} 중 합친 칸 손실(c∪d) {merged} (--replay-neutral {mode})")
+        if mode == "c":
+            log(f"replay 중립 {neutral - merged} 쌍을 c 로 고정해 배운다")
+        elif neutral and merged < neutral:
+            log(f"주의: replay 중립 {neutral - merged} 쌍의 src 가 공개 출처 이름이 아니라 c 로만 배운다")
 
     def epoch_extra_paths(self, epoch):
         return [t.replace("{epoch}", str(epoch + 1)) for t in self.args.train_epoch]
@@ -553,14 +649,15 @@ class Run:
         items = list(self.main_items)
         for path in self.epoch_extra_paths(epoch):
             rows, _ = load_rows(path)
-            extra, cut = tokenize(rows, self.backend, self.args.max_len, None)
+            extra, cut = tokenize(rows, self.backend, self.args.max_len, None, self.num_labels)
             self.truncated[os.path.basename(path)] = cut
             items.extend(extra)
         n_replay = replay_count(self.args, len(self.main_rows))
         if n_replay:
             rng = random.Random(self.state["seed"] * 7919 + epoch)
             picked = rng.sample(self.replay_pool, min(n_replay, len(self.replay_pool)))
-            extra, _ = tokenize(picked, self.backend, self.args.max_len, None)
+            extra, _ = tokenize(picked, self.backend, self.args.max_len, None, self.num_labels,
+                                self.args.replay_neutral)
             items.extend(extra)
         return items
 
@@ -588,7 +685,7 @@ class Run:
         if args.replay:
             entry = data_entry(args.replay, self.replay_pool, 0)
             per_epoch = min(replay_count(args, len(self.main_rows)), len(self.replay_pool))
-            entry["replay"] = {"mix": args.mix_klue, "per_epoch": per_epoch}
+            entry["replay"] = {"mix": args.mix_klue, "per_epoch": per_epoch, "neutral": args.replay_neutral}
             data.append(entry)
         st = self.state
         elapsed = max(1e-9, time.time() - st["started"])
@@ -600,11 +697,12 @@ class Run:
             "data": data, "dropped_no_label": self.dropped, "max_len": args.max_len,
             "dev": {"file": os.path.basename(args.dev), "rows": len(self.dev_items),
                     "truncated": self.truncated.get("_dev", 0)} if args.dev else None,
-            "labels": LABELS, "source_labels": SOURCE_LABELS,
+            "labels": LABELS[:self.num_labels], "source_labels": SOURCE_LABELS[:self.num_labels],
             "hparams": {"lr": st["lr"], "epochs": args.epochs, "batch": args.batch, "accum": args.accum,
                         "warmup": args.warmup, "wd": args.wd, "eps": args.eps, "betas": args.betas,
-                        "eval_every": args.eval_every, "select": args.select, "class_weight": self.weights,
+                        "eval_every": args.eval_every, "select": args.select, "class_weight": self.weights, "class_weight_scale": args.class_weight_scale,
                         "mix_klue": args.mix_klue if args.replay else None, "new_head": args.new_head,
+                        "grow_head": args.grow_head or None,
                         "total_steps": self.total_steps},
             "seed": st["seed"], "restarts": st["restarts"], "steps": st["step"],
             "sec_per_step": round(elapsed / max(1, st["step"]), 4),
@@ -635,7 +733,8 @@ class Run:
         st = self.state
         row = {"epoch": st["epoch"] + (1 if epoch_end else 0), "step": st["step"], **metrics}
         st["dev_history"].append(row)
-        log(f"dev epoch {row['epoch']} step {st['step']} acc {metrics['acc']} recall {metrics['recall']} "
+        log(f"dev epoch {row['epoch']} step {st['step']} acc {metrics['acc']} acc3 {metrics['acc3']} "
+            f"recall {metrics['recall']} "
             f"false_support {metrics['false_support']} loss {metrics['loss']}")
         if better(self.args.select, metrics, st["best_metrics"]):
             st["best_metrics"] = metrics
@@ -655,8 +754,9 @@ class Run:
         if self.state["step"] < args.collapse_step:
             return
         self.state["collapse_checked"] = True
-        if metrics["acc"] < args.collapse_acc:
-            raise Collapse(f"dev acc {metrics['acc']} < {args.collapse_acc} at step {self.state['step']}")
+        # acc3 = 3칸으로 접은 정확도. 3칸 모델이면 acc 와 같고, 4칸이면 c·d 경계 흔들림을 무너짐으로 안 본다
+        if metrics["acc3"] < args.collapse_acc:
+            raise Collapse(f"dev acc3 {metrics['acc3']} < {args.collapse_acc} at step {self.state['step']}")
 
     def after_step(self, loss):
         args = self.args
@@ -708,10 +808,14 @@ class Run:
                 st["step"] += 1
                 self.after_step(loss_acc)
                 loss_acc = 0.0
-            self.check_collapse(self.run_eval(epoch_end=True))
+            metrics = self.run_eval(epoch_end=True)
+            self.check_collapse(metrics)
             st["epoch"] += 1
             st["micro"] = 0
             self.checkpoint()
+            if args.save_every_epoch:
+                save_best(os.path.join(args.out, f"ckpt-e{st['epoch']}"), self.model, self.tokenizer,
+                          epoch_end_metrics(metrics, st["dev_history"]), st)
             write_info(args, self.info("running"))
         if args.select == "last":
             # 마지막 바퀴 가중치를 ckpt-best 로 한 번만 낸다 (바퀴마다 덮어 쓰는 저장 비용을 안 늘린다)
@@ -763,24 +867,34 @@ SMOKE_SUBJECTS = ["고양이", "서버", "버튼", "창고", "기차", "편지",
 SMOKE_TRAITS = ["빠르다", "조용하다", "무겁다", "밝다"]
 
 
-def smoke_rows(n, seed):
-    """손으로 만든 일반 문장 쌍. 지지 · 반대 · 무관이 번갈아 나온다."""
+def smoke_rows(n, seed, num_labels=3):
+    """손으로 만든 일반 문장 쌍. 지지 · 반대 · 무관이 번갈아 나온다.
+
+    num_labels 가 4 면 비슷한 계열(d) · CD 쌍 · 공개 출처 중립(klue, 합친 칸 손실)도 섞는다.
+    """
     rng = random.Random(seed)
+    cycle = [0, 1, 2] if num_labels <= 3 else [0, 1, 2, 3, CD, "klue-neutral"]
     rows = []
     for i in range(n):
         subject = rng.choice(SMOKE_SUBJECTS)
         trait = rng.choice(SMOKE_TRAITS)
         premise = f"{subject} 는 {trait}. 오늘도 그렇다."
-        label = i % 3
+        label, src = cycle[i % len(cycle)], "smoke"
+        if label == "klue-neutral":
+            label, src = 2, "klue"
         if label == 0:
             hypothesis = f"{subject} 는 {trait}."
         elif label == 1:
             hypothesis = f"{subject} 는 {trait} 않다."
+        elif label == 3:
+            hypothesis = f"{subject} 의 무게는 어제 쟀다."
+        elif label == CD:
+            hypothesis = f"{subject} 는 내일 옮긴다."
         else:
             other = SMOKE_SUBJECTS[(SMOKE_SUBJECTS.index(subject) + 3) % len(SMOKE_SUBJECTS)]
             hypothesis = f"{other} 의 색은 파랗다."
         rows.append({"id": f"s{i:03d}", "premise": premise, "hypothesis": hypothesis, "label": label,
-                     "src": "smoke", "kind": "same" if label == 0 else ""})
+                     "src": src, "kind": "same" if label == 0 else ""})
     return rows
 
 
@@ -817,9 +931,12 @@ def write_rows(path, rows):
 
 
 def run_smoke(args):
-    """64쌍 · batch 8 · 1 바퀴(8 스텝). 4 스텝에서 멈췄다가 --resume 으로 끝까지 — 저장·재개·평가·기록을 본다."""
+    """64쌍 · batch 8 · 1 바퀴(8 스텝). 4 스텝에서 멈췄다가 --resume 으로 끝까지 — 저장·재개·평가·기록을 본다.
+
+    --grow-head 4 를 주면 3칸 시작 모델의 머리를 넷으로 늘려 d · CD · 공개 중립 쌍까지 배운다 (넷 칸 판).
+    """
     os.makedirs(args.out, exist_ok=True)
-    rows = smoke_rows(SMOKE_ROWS, 1)
+    rows = smoke_rows(SMOKE_ROWS, 1, args.grow_head or 3)
     train_path = os.path.join(args.out, "smoke-train.jsonl")
     dev_path = os.path.join(args.out, "smoke-dev.jsonl")
     write_rows(train_path, rows)
@@ -853,9 +970,15 @@ def run_smoke(args):
         problems.append(f"없음 {args.heartbeat}")
     if not info["dev_history"]:
         problems.append("dev_history 비었음")
+    want_labels = args.grow_head or 3
+    if len(info["labels"]) != want_labels:
+        problems.append(f"labels {info['labels']} 이 {want_labels} 칸이 아니다")
+    if info["dev_history"] and len(info["dev_history"][-1]["confusion"]) != want_labels:
+        problems.append(f"dev 혼동표가 {want_labels} 칸이 아니다")
     if problems:
         raise SystemExit("SMOKE FAIL: " + " · ".join(problems))
-    print("SMOKE OK " + json.dumps({"steps": info["steps"], "dev": info["dev_history"][-1]["acc"],
+    print("SMOKE OK " + json.dumps({"steps": info["steps"], "labels": len(info["labels"]),
+                                    "dev": info["dev_history"][-1]["acc"], "acc3": info["dev_history"][-1]["acc3"],
                                     "best": info["best"], "out": args.out}, ensure_ascii=False), flush=True)
     return 0
 
