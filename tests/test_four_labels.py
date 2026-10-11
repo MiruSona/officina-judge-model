@@ -28,6 +28,15 @@ import split_pairs as sp
 HAS_TORCH = helpers.has("torch", "transformers", "tokenizers")
 
 
+def protocol_gate():
+    """정본 규약(measure/protocol-g1.json)의 release_gate — 시험도 숫자를 따로 박지 않는다."""
+    with open(prereg.DEFAULT_PROTOCOL, encoding="utf-8") as f:
+        return json.load(f)["release_gate"]
+
+
+CRIT4 = prereg.criteria_from_gate(protocol_gate())
+
+
 def logits_for(probs):
     return [math.log(p) for p in probs]
 
@@ -331,11 +340,11 @@ class MeasureFourTest(unittest.TestCase):
         self.assertEqual(t["related_sure_precision"], 0.5)
 
     def verdict(self, **over):
-        model = {"accuracy3": 0.9, "recall": {"a": 0.9, "b": 0.8, "c": 0.7, "d": 0.65}}
-        sure = {"false_support_share": 0.01, "unsure_rate": 0.2, "related_sure_precision": 0.8}
+        model = {"accuracy3": 0.9, "recall": {"a": 0.9, "b": 0.8, "c": 0.7, "d": 0.75}}
+        sure = {"false_support_share": 0.01, "unsure_rate": 0.2, "related_sure_precision": 0.85}
         model["recall"].update(over.pop("recall", {}))
         sure.update(over)
-        return rm.verdict(prereg.CRITERIA_V2, model, None, 500.0, sure)
+        return rm.verdict(CRIT4, model, None, 500.0, sure)
 
     def test_v2_pass(self):
         v = self.verdict()
@@ -351,8 +360,8 @@ class MeasureFourTest(unittest.TestCase):
         self.assertEqual(self.verdict(recall={"b": 0.7})["next"], "fail_old")
 
     def test_v2_missing_sure_table_is_not_pass(self):
-        model = {"accuracy3": 0.9, "recall": {"b": 0.8, "d": 0.65}}
-        self.assertFalse(rm.verdict(prereg.CRITERIA_V2, model, None, 500.0, None)["passed"])
+        model = {"accuracy3": 0.9, "recall": {"b": 0.8, "d": 0.75}}
+        self.assertFalse(rm.verdict(CRIT4, model, None, 500.0, None)["passed"])
 
     def test_letters_must_match_prereg(self):
         with self.assertRaises(SystemExit):
@@ -395,13 +404,54 @@ class PreregFourTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             prereg.build(self.spec, {}, set(), set())
 
-    def test_four_uses_new_criteria(self):
+    def four_spec(self):
         spec = json.loads(json.dumps(self.spec))
         spec["scores"]["thresholds"]["nli_sure_related"] = 0.7
-        got = prereg.build(spec, {}, set(), set())
-        self.assertEqual(got["criteria"], prereg.CRITERIA_V2)
+        return spec
+
+    def test_four_needs_protocol(self):
+        with self.assertRaises(SystemExit):
+            prereg.build(self.four_spec(), {}, set(), set())
+
+    def test_four_reads_criteria_from_protocol(self):
+        gate = protocol_gate()
+        got = prereg.build(self.four_spec(), {}, set(), set(), {"release_gate": gate}, "/x/protocol-g1.json", "f" * 64)
         self.assertEqual((got["nli_sure_related"], got["letters"]), (0.7, ["a", "b", "c", "d"]))
-        self.assertEqual(got["criteria"]["false_support_share_max"], 0.015)
+        c = got["criteria"]
+        self.assertEqual(c["accuracy3_min"], gate["acc3_min"])
+        self.assertEqual(c["contradict_recall_min"], gate["b_recall_min"])
+        self.assertEqual(c["false_support_share_max"], gate["sure_false_support_share_max"])
+        self.assertEqual(c["unsure_max"], gate["unsure_max"])
+        self.assertEqual(c["related_recall_min"], gate["d_recall_min"])
+        self.assertEqual(c["related_sure_precision_min"], gate["d_sure_precision_min"])
+        self.assertEqual(c["p95_ms_max"], gate["p95_ms_max"])
+        self.assertNotIn("fold_wrong_max", c)  # 규약에 없으면 옮기지 않는다
+        self.assertEqual(got["release_gate"], gate)
+        self.assertEqual((got["protocol_file"], got["protocol_sha256"]), ("protocol-g1.json", "f" * 64))
+
+    def test_gate_values_follow_protocol_not_code(self):
+        # 규약 값을 바꾸면 prereg 도 따라간다 — 코드에 숫자가 숨어 있지 않다
+        gate = dict(protocol_gate(), d_recall_min=0.123, d_sure_precision_min=0.456, fold_wrong_max=2)
+        c = prereg.criteria_from_gate(gate)
+        self.assertEqual((c["related_recall_min"], c["related_sure_precision_min"], c["fold_wrong_max"]),
+                         (0.123, 0.456, 2))
+        del gate["d_recall_min"]
+        with self.assertRaises(SystemExit):
+            prereg.criteria_from_gate(gate)
+
+    def test_main_writes_default_protocol_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "model.json"), "w", encoding="utf-8") as f:
+                json.dump(self.four_spec(), f)
+            out = os.path.join(tmp, "prereg.json")
+            with mock.patch("sys.stdout"):
+                prereg.main(["--model-dir", tmp, "--set", f"m={os.path.join(tmp, 'model.json')}", "--out", out])
+            with open(out, encoding="utf-8") as f:
+                got = json.load(f)
+        gate = protocol_gate()
+        self.assertEqual(got["criteria"]["related_recall_min"], gate["d_recall_min"])
+        self.assertEqual(got["criteria"]["related_sure_precision_min"], gate["d_sure_precision_min"])
+        self.assertEqual(got["protocol_sha256"], prereg.sha256_file(prereg.DEFAULT_PROTOCOL))
 
 
 class FoldTest(unittest.TestCase):
@@ -499,9 +549,9 @@ class FoldTest(unittest.TestCase):
                    {"id": "c", "group": "inside", "fold": [], "wrong": [], "missed": ["x"], "calls": 2}]
         t = rf.fold_table(results)
         self.assertEqual((t["fold_wrong"], t["fold_missed"], t["pairs_done_in_two"]), (1, 1, 2))
-        self.assertTrue(rf.fold_verdict(prereg.CRITERIA_V2, t)["passed"])
+        self.assertTrue(rf.fold_verdict({"fold_wrong_max": 1}, t)["passed"])
         t["fold_wrong"] = 2
-        self.assertFalse(rf.fold_verdict(prereg.CRITERIA_V2, t)["passed"])
+        self.assertFalse(rf.fold_verdict({"fold_wrong_max": 1}, t)["passed"])
 
 
 @unittest.skipUnless(HAS_TORCH, "torch · transformers · tokenizers 없음")

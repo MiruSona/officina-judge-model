@@ -208,7 +208,7 @@ python -I serve.py --model ~/.judgemodel/models/nli-studio-v1 --port 8092 --thre
 
 - train 쌍은 `support-v4` 라벨(a·b·c·d · 못 고른 `cd`). `cd` 쌍과 replay 의 공개 NLI 중립은 「c 또는 d」로 가르친다 — 손실 −log(p_c+p_d). replay 의 `src` 가 공개 출처 이름(klue · kornli-* · mnli · snli)이어야 이렇게 간다. 로그의 「replay 중립 … 합친 칸 손실」 줄로 확인한다.
 - `calibrate.py` 는 네 칸이면 확신 거짓 지지 몫을 2% → 1% 로 조이고, `nli_sure_related` 를 dev 확신 d 정밀도 ≥ 0.80 인 가장 작은 값(0.50~0.99)으로 고른다.
-- 측정 자는 `measure/prereg-v2.example.json`. blind 는 `run_measure.py`, fold40 은 `run_fold.py` 로 잰다.
+- 측정 자의 정본은 `measure/protocol-g1.json` 의 `release_gate`(prereg.py 가 읽음). `prereg-v2.example.json` 은 꼴 보기용. blind 는 `run_measure.py`, fold40 은 `run_fold.py` 로 잰다.
 - 명령 줄 보기는 `run/podman-train.sh` 머리 주석의 r2-01 줄.
 
 | 사용법 | 하는 일 |

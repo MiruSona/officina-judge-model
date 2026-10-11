@@ -7,6 +7,7 @@
    - **기준선 자 상태** : `python -I measure/baseline.py --protocol … --set <dev-cmp-g1.jsonl> --runs B0=<판1>/eval-dev-cmp,… --rerun <판1r>/eval-dev-cmp --out b.json --md b.md` → 판별 지표 · 씨앗 짝 반폭(3%p 가리나) · 재실행 차 · 곁 자. 거부 규칙은 compare 와 같다.
 2. **짝 비교** : `python -I measure/compare.py --protocol measure/protocol-g1.json --set <dev-cmp-g1.jsonl> --base B0=<판1>/eval-dev-cmp,<판2>/…,<판3>/… --new B1=… --by domain,lang --out c.json --md c.md` → 먹힘 · 같다 · 지킴 깨짐 · 보류.
 3. **릴리스 관문** : `python -I measure/gates.py release --protocol … --set <blind-g1.jsonl> --pred <판>/eval-blind --calibration <판>/calibration.json --ref-pred <v1.0.0 pred> --p95-ms <값>`. `gates.py pair …` 는 compare 와 같다.
+   - **사전 등록** : `measure/prereg.py` 도 4칸 모델의 자를 `--protocol`(기본 `measure/protocol-g1.json`)의 `release_gate` 에서 읽어 `criteria` · `release_gate` · `protocol_sha256` 으로 박제한다. 코드에 자 숫자를 두지 않는다. fold40 을 관문에 넣으려면 새 규약에 `fold_wrong_max` 를 넣는다(g1 에는 없음).
 4. **거부(exit 2)** : 판의 `summary.json` 에 `set_sha256` · `protocol_sha256` 이 없거나 다를 때, calibration 이 잴 셋으로 골라졌을 때(`calib_set_sha256` · 옛 `fitted_on.sha256`). 옛 판은 `eval_nli.py --protocol` 로 다시 잰다.
 5. **옛 고리 관문** : `python -I measure/gates.py legacy <diag.json>…` — dev 8 + 곁 3(옆 `eval-side.txt`).
 6. 시험 : `python -m unittest discover -s tests -p "test_compare.py"` · `"test_measure_gates.py"`.

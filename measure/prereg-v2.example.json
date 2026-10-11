@@ -1,4 +1,5 @@
 {
+ "_note": "자의 정본은 measure/protocol-g1.json 의 release_gate 이고 이 파일은 꼴 보기용 (prereg.py 가 규약에서 읽어 적는다)",
  "written_at": "YYYY-MM-DD HH:MM:SS",
  "model": {"name": "nli-studio-v3", "weights_sha256": "<64 hex>"},
  "temperature": 1.0,
@@ -13,6 +14,6 @@
   "dev2": {"file": "<dev-r2.jsonl>", "sha256": "<64 hex>", "once": false, "judge": false}
  },
  "criteria": {"accuracy3_min": 0.85, "contradict_recall_min": 0.75, "false_support_share_max": 0.015, "unsure_max": 0.30,
-              "related_recall_min": 0.60, "related_sure_precision_min": 0.75, "fold_wrong_max": 1, "p95_ms_max": 1000.0},
+              "related_recall_min": 0.70, "related_sure_precision_min": 0.80, "fold_wrong_max": 1, "p95_ms_max": 1000.0},
  "next": {"pass": "…", "p95_only": "…", "fail_old": "…", "fail_related": "…"}
 }
