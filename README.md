@@ -201,6 +201,7 @@ python -I serve.py --model ~/.judgemodel/models/nli-studio-v1 --port 8092 --thre
 4. **덧학습** : `split_pairs.py` 로 dev 다시 가르기 → `train_nli.py --stage studio --init runs/base-2/ckpt-best --replay … --mix-klue 1:1 --class-weight --select last --eval-every 0` → `eval_nli.py`(dev) → `calibrate.py` → `export_onnx.py --name nli-studio-v2 --parent …/nli-base-v2/model.json`. `--select last` 는 마지막 바퀴를 `ckpt-best` 로 낸다(덧학습 기본). `studio` 는 거짓 지지 개수를 먼저 견줘 덜 배운 이른 바퀴를 고르는 함정이 있다 (`Docs/Research/2026-10-09-길1보강반복.md`). `export_onnx.py` 는 `--body-name` 이 없으면 `--parent` 의 몸통을 물려받고, 둘 다 없으면 멈춘다 — 기반 판은 `--body-name FacebookAI/xlm-roberta-large` 를 꼭 준다.
 5. **꽂기 전** : 메인 PC 로 모델 폴더를 옮겨 `serve.py` 를 띄우고 `check_onnx.py --url …` 통과.
 6. **측정** : `freeze.py check` → `measure/prereg.py` (한 번만, 덮지 않음) → `measure/run_measure.py`.
+   - **실사용 측정 use1** (mem 이 실제로 묻는 자리에서 v1.0.0 · v1.1.0 견주기, 2026-10-12) : `measure/README.md` 7항.
 
 명령마다 인자는 각 파일 머리 주석에 있다.
 

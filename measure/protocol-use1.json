@@ -1,0 +1,36 @@
+{
+ "name": "protocol-use1",
+ "design": "Docs/Design/2026-10-12-실사용측정설계.md 2절 · 11-1 줄인 판",
+ "hash_rule": "protocol-g1 과 같다 — 이 파일 바이트의 sha256 을 모든 결과에 protocol_sha256 으로 적는다. 고치려면 protocol-use2.json 새 판을 만든다",
+ "kind": "report_only",
+ "models": {
+  "v100": {"name": "nli-studio-v2", "letters": "abc", "default_url": "http://127.0.0.1:8093", "enabled": true},
+  "v110": {"name": "nli-studio-v4", "letters": "abc", "note": "--compat3", "default_url": "http://127.0.0.1:8092", "enabled": true},
+  "v110d": {"name": "nli-studio-v4", "letters": "abcd", "note": "4칸 · label_set nli4 — 줄인 판에서 뺐다", "enabled": false}
+ },
+ "reply": "v110",
+ "thresholds": {
+  "repo": {"source": "mem judge config --json", "enabled": true},
+  "model": {"source": "<모델>/calibration.json thresholds", "enabled": false},
+  "harness": {"pass": 0.8, "review": 0.5, "enabled": false}
+ },
+ "unsure_rule": {"below": 0.40, "tie_gap": 0.01, "note": "AIMemoryTool llm.unsureOf 와 같다 + 글자별 확신선(지지 nli_sure_support · 반대·무관 nli_sure)"},
+ "places": {
+  "1-retain": {"enabled": true, "strata": {"replay-hard": 25, "replay-own": 15}, "off_strata": {"real": "줄인 판에서 뺐다"}, "target": 50,
+               "metrics": ["sure_false_support", "false_reject", "unsure", "filter_rate"]},
+  "2-contradict": {"enabled": true, "strata": {"flagged": 60, "rest": 30, "plus-superseded": 20}, "target": 50, "b_min": 20,
+                   "metrics": ["false_contradict", "d_to_b", "b_recall", "queue_rows"]},
+  "3-merge": {"enabled": true, "strata": {"m0": 0}, "strata_note": "0 = 전부", "off_strata": {"hidden": "m0 안에서 모델마다 셈", "near": "③-2 줄인 판에서 뺐다"},
+              "target": 50, "metrics": ["hidden_miss"], "off_metrics": ["sim_miss", "sim_drop"]},
+  "4-report": {"enabled": true, "collect_days": 5, "target": 50, "metrics": ["false_contradict", "b_recall", "unsure"]},
+  "5-harness": {"enabled": true, "collect_days": 7, "target": 50, "metrics": ["sure_false_support", "unsure", "compress_loss", "semif_agree"]}
+ },
+ "tell_min_pp": 10,
+ "sample_seed": 20261012,
+ "bootstrap": {"n": 10000, "ci": 0.95, "rng_seed": 20261012, "resample": "group"},
+ "group_key": "evidence 문장 sha256 (StripTags 뒤)",
+ "pair_key": "sha256(evidence + U+001F + claim) (StripTags 뒤) — EXCLUDE.sha256list · 본 쌍 대조 · queries.jsonl 이 같은 열쇠를 쓴다",
+ "label": {"guide": "support-v5", "notes": "설계 6-2 mem 자리 덧규칙", "judges": 2, "third": true, "human": "두 모델의 자리 결과가 갈린 쌍만 (11-1)"},
+ "freeze": "별명마다 set-use1.jsonl 한 번. FROZEN-use1-<별명>.sha256 · frozen.json(frozen_at). 다시 안 얼림. 얼린 쌍 열쇠는 use1/EXCLUDE.sha256list 에 더한다",
+ "seen_check": "~/.judgemodel/sets · build 의 jsonl 과 쌍 열쇠 대조 — 본 쌍 비율을 따로 보고"
+}
