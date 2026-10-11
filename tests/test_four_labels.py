@@ -12,6 +12,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from unittest import mock
 
 import helpers
 
@@ -357,6 +358,27 @@ class MeasureFourTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             rm.server_letters({"letters": ["a", "b", "c"]}, {"letters": ["a", "b", "c", "d"]})
         self.assertEqual(rm.server_letters({}, {}), ["a", "b", "c"])
+
+    def test_label_set_follows_prereg_letters(self):
+        # prereg 칸 수로 청할 칸을 고른다 — letters 없는 옛 prereg 는 3칸
+        self.assertEqual(rm.prereg_label_set({}), (["a", "b", "c"], "nli3"))
+        self.assertEqual(rm.prereg_label_set({"letters": ["a", "b", "c", "d"]}), (["a", "b", "c", "d"], "nli4"))
+
+    def test_ask_judge_sends_label_set_and_checks_reply(self):
+        sent = []
+
+        def fake(url, body=None):
+            sent.append((url, body))
+            return {"a": 0.1, "b": 0.2, "c": 0.3, "d": 0.4, "label_set": "nli4"}
+        with mock.patch.object(rm, "http_json", fake):
+            body = rm.ask_judge("http://x/", "e", "c", "nli4")
+        self.assertEqual(sent, [("http://x/judge", {"evidence": "e", "claim": "c", "label_set": "nli4"})])
+        self.assertEqual(body["d"], 0.4)
+        # --compat3 서버는 nli4 요청에 nli3 으로 답한다 — 청한 칸과 다르면 멈춘다
+        with mock.patch.object(rm, "http_json", lambda url, body=None: {"a": 0.5, "b": 0.3, "c": 0.2,
+                                                                         "label_set": "nli3"}):
+            with self.assertRaises(SystemExit):
+                rm.ask_judge("http://x", "e", "c", "nli4")
 
     def test_cd_not_allowed_in_measure_set(self):
         with self.assertRaises(SystemExit):

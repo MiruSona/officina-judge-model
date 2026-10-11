@@ -21,6 +21,7 @@ fold40 의 sentences · evidence 는 손님(AIMemoryTool) FoldClaims · FoldEvid
 
 접기 오판 = 모델이 「담김」이라 한 쪽(접을 쪽)을 사람은 「잃는 말 있음」이라 한 것. 양쪽 다 담김이면 두 쪽 다 맞아야 한다.
 자는 prereg criteria 의 fold_wrong_max (넷 확장 설계 4-2, ≤ 1 짝). 문턱은 prereg 의 값을 그대로 쓴다.
+/judge 에는 label_set 을 명시해 청한다(prereg 칸 수 → nli4). 응답 label_set 이 다르면 멈춘다.
 """
 import argparse
 import json
@@ -34,7 +35,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "train"))
 
 from calibrate import answer  # noqa: E402
 from data_prep import strip_tags  # noqa: E402
-from run_measure import check_server, check_set, http_json, read_rows  # noqa: E402
+from run_measure import ask_judge, check_server, check_set, prereg_label_set, read_rows  # noqa: E402
 
 SUPPORT, CONTRADICT = 0, 1
 MAX_SENTENCES = 5
@@ -164,11 +165,11 @@ def main(argv=None):
     rows = read_rows(path)
     check_rows(rows)
     info, result_path = check_set(a, prereg, name, path)
-    letters = check_server(a, prereg)
-    url = a.url.rstrip("/") + "/judge"
+    check_server(a, prereg)
+    letters, label_set = prereg_label_set(prereg)
 
     def ask(evidence, claim):
-        body = http_json(url, {"evidence": evidence, "claim": claim})
+        body = ask_judge(a.url, evidence, claim, label_set)
         return [body[letter] for letter in letters]
 
     results = [judge_pair(row, ask, prereg["nli_sure"], prereg["nli_sure_support"]) for row in rows]

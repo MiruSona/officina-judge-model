@@ -10,7 +10,7 @@ torch 와 onnxruntime 이 한 venv 에 없으면 두 번에 나눠 돈다 :
 
 - 토큰 일치 : transformers 토크나이저와 tokenizers(서버가 쓰는 것) ids 가 쌍마다 완전히 같다
 - 확률 일치 : torch 판과 ONNX 판(serve.OnnxNLI) 확률 차 최대 ≤ 1e-3 · 최고 답 100% 같다
-- p95 (--url) : 순차 HTTP 왕복 p95 ≤ 1.0초 (서버는 따로 띄워 둔다)
+- p95 (--url) : 순차 HTTP 왕복 p95 ≤ 1.0초 (서버는 따로 띄워 둔다). label_set 을 명시해 모델 칸 수대로 청한다
 - int8 (--int8) : fp32 와 최고 답 일치 ≥ 99% · 라벨 있는 쌍 정확도 하락 ≤ 1점
 """
 import argparse
@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.join(HERE, "train"))
 
 from data_prep import read_pairs  # noqa: E402
 from pairenc import encode_pair  # noqa: E402
-from serve import OnnxNLI, load_spec, softmax  # noqa: E402
+from serve import SET_OF, OnnxNLI, load_spec, softmax  # noqa: E402
 
 LIMIT_DIFF = 1e-3
 LIMIT_P95_MS = 1000.0
@@ -53,8 +53,10 @@ def hf_ids(tokenizer, evidence, claim, max_len):
     return tokenizer(evidence, claim, truncation=strategy, max_length=max_len)["input_ids"]
 
 
-def ask(url, evidence, claim):
-    data = json.dumps({"evidence": evidence, "claim": claim}, ensure_ascii=False).encode("utf-8")
+def ask(url, evidence, claim, label_set):
+    # 서버 기본 꼴에 기대지 않고 칸을 명시해 청한다 (응답은 재지 않으니 칸은 확인하지 않는다)
+    body = {"evidence": evidence, "claim": claim, "label_set": label_set}
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url + "/judge", data=data, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=30) as res:
         return json.loads(res.read().decode("utf-8"))
@@ -184,11 +186,12 @@ def main(argv=None):
         passed = passed and same / len(rows) >= LIMIT_INT8_AGREE and drop <= LIMIT_INT8_ACC_DROP
 
     if a.url:
-        ask(a.url, "데우기", "데우기")
+        label_set = SET_OF[len(spec["_letters"])]
+        ask(a.url, "데우기", "데우기", label_set)
         lat = []
         for r in rows:
             start = time.perf_counter()
-            ask(a.url, r["premise"], r["hypothesis"])
+            ask(a.url, r["premise"], r["hypothesis"], label_set)
             lat.append((time.perf_counter() - start) * 1000)
         result["http_ms"] = {"p50": round(pct(lat, 0.5), 1), "p95": round(pct(lat, 0.95), 1), "max": round(max(lat), 1)}
         passed = passed and pct(lat, 0.95) <= LIMIT_P95_MS

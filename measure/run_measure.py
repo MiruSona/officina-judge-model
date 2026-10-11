@@ -10,6 +10,7 @@
   (mem 이 PATH 에 없으면 모델 표만 낸다. mem 의 nli_url · 문턱이 prereg 와 다르면 재지 않는다)
 - p95 : 모델 표를 묻는 같은 HTTP 왕복
 응답 칸은 서버 /health 의 letters 를 따른다 (없으면 옛 a·b·c). 4칸 prereg 면 서버도 4칸이어야 한다.
+/judge 에는 label_set 을 명시해 청한다 — prereg 칸 수가 3이면 nli3, 4면 nli4. 응답 label_set 이 다르면 멈춘다.
 판정 : 3칸 prereg(옛 자)는 모델 표 + 사다리 표, 4칸 prereg(넷 확장 자)는 모델 표 + 확신 표로 한다.
 접기 오판(fold40)은 기억 짝 단위라 여기서 안 잰다 — measure/run_fold.py 가 따로 판정한다. 넷 확장 판의 통과는 둘 다 통과다.
 prereg 의 셋 SHA · 모델 SHA 가 다르면 재지 않는다. once 셋은 결과 파일이 이미 있으면 다시 재지 않는다.
@@ -258,6 +259,20 @@ def server_letters(health, prereg):
     return letters
 
 
+def prereg_label_set(prereg):
+    """prereg 칸 수로 청할 칸을 고른다. (칸 목록, label_set). letters 가 없는 옛 prereg 는 3칸이다."""
+    letters = list(prereg.get("letters") or LETTERS[:3])
+    return letters, {3: "nli3", 4: "nli4"}[len(letters)]
+
+
+def ask_judge(url, evidence, claim, label_set):
+    """label_set 을 명시해 /judge 를 부른다. 서버가 청한 칸으로 못 답하면 멈춘다."""
+    body = http_json(url.rstrip("/") + "/judge", {"evidence": evidence, "claim": claim, "label_set": label_set})
+    if body.get("label_set") != label_set:
+        raise SystemExit(f"서버 칸 {body.get('label_set')} 이 청한 칸 {label_set} 과 다르다 — --compat3 로 띄웠나 본다")
+    return body
+
+
 def check_server(a, prereg):
     """서버 /health 를 보고 모델 SHA · 칸을 prereg 와 견준다. 응답 칸 목록을 돌려준다."""
     health = http_json(a.url.rstrip("/") + "/health")
@@ -291,16 +306,17 @@ def parse_args(argv=None):
 
 def measure_set(a, prereg, name, path):
     info, result_path = check_set(a, prereg, name, path)
-    letters = check_server(a, prereg)
+    check_server(a, prereg)
+    letters, label_set = prereg_label_set(prereg)
 
     rows = read_rows(path)
     golds = gold_labels(rows)
     probs, lat = [], []
-    http_json(a.url.rstrip("/") + "/judge", {"evidence": "데우기", "claim": "데우기"})
+    ask_judge(a.url, "데우기", "데우기", label_set)
     for r in rows:
         start = time.perf_counter()
-        body = http_json(a.url.rstrip("/") + "/judge",  # 꼬리표는 손님처럼 떼고 보낸다 (data_prep.strip_tags)
-                         {"evidence": strip_tags(r["evidence"]), "claim": strip_tags(r["claim"])})
+        # 꼬리표는 손님처럼 떼고 보낸다 (data_prep.strip_tags)
+        body = ask_judge(a.url, strip_tags(r["evidence"]), strip_tags(r["claim"]), label_set)
         lat.append((time.perf_counter() - start) * 1000)
         probs.append([body[letter] for letter in letters])
     model = model_table(golds, probs)

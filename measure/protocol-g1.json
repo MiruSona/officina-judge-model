@@ -1,0 +1,50 @@
+{
+ "name": "protocol-g1",
+ "design": "Docs/Design/2026-10-11-d자료층재구축설계.md 2-3 · 6-2",
+ "hash_rule": "이 파일 바이트의 sha256 을 모든 결과(eval summary.json · compare · gates · prereg)에 protocol_sha256 으로 적는다. 첫 비교 전에 커밋하고, 고치려면 protocol-g2.json 새 판을 만든다 (이 파일은 안 고친다).",
+ "seeds": [1, 2, 3, 4, 5],
+ "seeds_note": "45-라 (10-11) : 씨앗 3 → 5, 학습은 결정 모드(train_nli --deterministic). 첫 짝 비교 전에 고쳤다 — 이 해시 전의 B0(g1-B0-*) 결과는 견주지 않는다",
+ "seed_rerun": 1,
+ "ckpt": "last",
+ "release_pick": {"rule": "closest_to_mean", "metric": "d_recall", "set": "dev-cmp-g1", "tie": "acc3 높은 판 · 그다음 씨앗 작은 판"},
+ "bootstrap": {"n": 10000, "ci": 0.95, "rng_seed": 20261011, "resample": "group", "seeds": "고정 — 씨앗은 다시 뽑지 않는다"},
+ "group_key": "group",
+ "majority": "씨앗 중 과반이 맞혀야 맞힘 (맞힌 수 × 2 > 씨앗 수) — McNemar 입력",
+ "calibrate_on": "dev-cal-g1",
+ "compare_on": "dev-cmp-g1",
+ "sets": {
+  "dev-cal-g1": "6ac519548eb97a487960e9184b57ddafaa1904829896595ac7deaa653d1f4224",
+  "dev-cmp-g1": "503fe29b5274b01a342a46c32b7cd50fc43f659c165d26b06c4af0f8e703a672",
+  "blind-g1": "d8b63de8dc162b770deb999dce170d4ccfb00f74ec6f98a151dd0431b02bb986",
+  "ood-g1": "6584a3176e672d1543246b39ca3eef4a411f034298cbfeef905089562880372c"
+ },
+ "sets_note": "셋 해시 칸은 소단계 45 가 셋을 얼린 뒤 한 번 채우고 커밋한다 (첫 비교 전이라 괜찮다 · 비교가 시작된 뒤엔 새 판 파일). 빈 값이면 compare · gates 가 셋 해시를 이 칸과 견주지 않는다",
+ "side": {"mnli": "mnli-devm2000", "klue": "klue-dev", "k48": "k48"},
+ "pair_gate": {
+  "target": {"metric": "d_recall", "min_mean_diff": 0.03, "ci_low_gt": 0.0},
+  "guards": [
+   {"metric": "acc3", "ci_low_ge": -0.02},
+   {"metric": "b_recall", "ci_low_ge": -0.03},
+   {"metric": "false_support", "max_ratio": 1.2},
+   {"metric": "side_acc3", "sides": ["mnli", "klue"], "min_mean_diff": -0.010}
+  ],
+  "alarms": [
+   {"metric": "k48_hits", "min": 40},
+   {"metric": "lang_d_recall", "lang": "ko", "min_mean_diff": -0.03}
+  ],
+  "report_only": ["by domain · lang d_recall", "d_to_a", "a_to_d", "unsure (dev-cal 문턱)", "d sure precision (dev-cal 문턱)"],
+  "verdicts": {"먹힘": "목표 충족 · 지킴 다 통과", "같다": "목표 못 미침 (더한 것을 뺀다)", "지킴 깨짐": "지킴 하나라도 미달", "보류": "목표 충족인데 지킴 중 잴 수 없는 것이 있음 (곁 자 없음 등)"}
+ },
+ "release_gate": {
+  "set": "blind-g1",
+  "acc3_min": 0.85,
+  "vs_ref_acc3_ci_low_ge": -0.02,
+  "ref_model": "nli-studio-v2 (v1.0.0)",
+  "b_recall_min": 0.75,
+  "sure_false_support_share_max": 0.015,
+  "unsure_max": 0.30,
+  "d_recall_min": 0.70,
+  "d_sure_precision_min": 0.80,
+  "p95_ms_max": 1000.0
+ }
+}

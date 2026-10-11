@@ -71,6 +71,69 @@ GET  /health → {..., "letters": ["a","b","c","d"], "protocol": "nli-v2"}
 - `serve.py --compat3` : d 를 c 에 더해 옛 3칸 꼴(`nli-v1`)로 낸다. 네 칸 모델을 옛 손님에게 붙일 때 쓴다.
 - `model.json` 에 `labels` · `letters` · `protocol`(`nli-v1`/`nli-v2`) · `label_guide`(`support-v3`/`support-v4`)가 붙는다. 네 칸이면 문턱에 `nli_sure_related`(확신 d)가 더 있다.
 
+### 1.1.0 응답 꼴 — `label_set` opt-in (2026-10-11)
+
+**요청에 `label_set` 을 안 실으면 응답은 옛 꼴 그대로다(바이트까지).** 실은 손님에게만 세 칸이 더 붙는다. 설계는 `Docs/Design/2026-10-11-d자료층재구축설계.md` 6절.
+
+```
+POST /judge {"evidence": "...", "claim": "...", "label_set": "nli4"}
+  → 200 {"a", "b", "c", "d", "model", "ms",
+         "labels": ["support","contradict","unrelated","related"], "model_version": "1.1.0", "label_set": "nli4"}
+GET  /info  → {"api_version": "1.1.0", "model_version", "model", "name", "protocol", "label_guide",
+               "default_label_set", "label_sets": {"nli3": {letters, labels}, "nli4": {...}}, "id2label"}
+```
+
+| 요청 `label_set` | 4칸 모델 | 3칸 모델 · `--compat3` |
+| --- | --- | --- |
+| 없음 (또는 `null`) | 옛 꼴 그대로 (`a b c d model ms`) | 옛 꼴 그대로 (`a b c model ms`) |
+| `"nli3"` | d 를 c 에 더한 3칸 + 세 칸 · `label_set: "nli3"` | 3칸 + 세 칸 · `"nli3"` |
+| `"nli4"` | 4칸 + 세 칸 · `"nli4"` | **3칸 + 세 칸 · `"nli3"`** — 에러 아님. 손님은 응답의 `label_set` 을 읽어 c·d 를 못 가른다는 것을 안다 |
+| 그 밖 (`"nli5"` · 숫자 · 목록) | 400 `{"error": "unknown label_set"}` | 같음 |
+
+- `/health` 는 안 바뀐다.
+- `model_version` 은 `model.json` 의 `model_version`(`export_onnx.py --model-version 1.1.0` 이 적는다)이고, 없으면 `/health` 의 `model`(가중치 SHA 앞 8자)과 같은 값이다. `model.json` 의 `label_set`(`nli3`/`nli4`)은 칸 수와 어긋나면 서버가 안 뜬다. 옛 `model.json`(두 칸 없음)은 그대로 읽힌다.
+- 판 번호 `1.1.0` 은 `serve.py` 의 `API_VERSION` 이다. 기본 응답을 4칸으로 바꾸는 날이 2.0.0 이다.
+- 저장소 안 호출자(`build/teacher.py` · `measure/run_fold.py` · `measure/run_measure.py` · `check_onnx.py`)는 `label_set` 을 명시해 보낸다.
+
+#### 카드 — v1.1 한계와 성적
+
+**v1.1.0 은 「3칸 개선판」이다 (사용자 결정 2026-10-11).** 모델은 `nli-studio-v4`(학습 판 `g1-B2-s3` · 가중치 SHA `14d0d520…` · 온도 2.35). 3칸(지지 · 반대 · 무관) 일은 v1.0.0(`nli-studio-v2`)보다 같은 쌍에서 분명히 낫다. **릴리스 자 여덟 중 셋은 미달이다** — 숨기지 않고 아래에 적는다.
+
+- **실서버(8092)는 `--compat3` 로 띄워 응답 꼴이 v1.0.0 과 같다(3칸).** 옛 손님은 그대로 쓴다. 옵션 없이 띄우면 기본이 4칸(nli4, `a b c d model ms`)이고, `label_set: "nli3"` 로 3칸을 받을 수 있다(위 표).
+- 띄우는 스크립트는 `run/serve-studio.ps1`(기본 v4 · `--compat3`). 되돌리기 : `.\run\serve-studio.ps1 -Model ~\.judgemodel\models\nli-studio-v2 -Compat3:$false`
+- **4칸(`label_set: "nli4"`)은 실험 기능 · 목표 미달이다.** d 재현이 .46 으로 목표 .70 에 크게 못 미치고, 확신 d 문턱을 못 찾아(`nli_sure_related` .99) **d 답은 늘 보류(hold)로 간다.** d 를 믿고 자동 처리하지 않는다.
+- d 70% · b 80% 는 v1.2 과제다.
+
+- d(비슷한 계열)는 「우리 도메인(개발 메모 · 설계 문서 · git 이력) + 공개 원천(이슈 · 설계 제안서 · 위키 · 뉴스 지문)」 안에서 쟀다. 손님 실물로는 안 쟀다.
+- 영어 d 는 번역하지 않은 영어 원천에서, 한국어 d 는 KLUE-MRC 와 우리 아카이브에서 왔다.
+- 라벨은 Opus 판정자 합의다. 사람 감사는 갈린 쌍 목록으로 미뤘다.
+- 학습 자료 라이선스 : VitaminC CC BY-SA 3.0 · KLUE-MRC CC BY-SA 4.0 · Jira CC BY 4.0 · PEP CC0 · KEP · Swift Apache-2.0 · Go BSD-3 · MiniCheck MIT.
+
+blind-g1 1,118쌍(a 221 · b 66 · c 566 · d 265) · 한 번만 잼 · 2026-10-11
+
+| 자 | 값 | 기준 | 판정 |
+| --- | --- | --- | --- |
+| 3칸 접은 정확도 | **.8148** | ≥ .85 | **미달** |
+| v1.0.0 대비 3칸 정확도 | +.0501 [+.0301, +.0706] · McNemar p 1e-6 (v1.0.0 .7648) | 95% 아래끝 ≥ −.02 | 통과 |
+| b(반대) 재현 | .7576 | ≥ .75 | 통과 |
+| 확신 거짓 지지 | 1 / 897 (0.11%) | ≤ 1.5% | 통과 |
+| 보류 | **.4159** | ≤ .30 | **미달** |
+| d 재현 | **.4604** | ≥ .70 | **미달** |
+| d 확신 정밀 | 잴 수 없음 (확신 d 0개) | ≥ .80 | — |
+| p95 | 281.9ms | ≤ 1,000ms | 통과 |
+
+- 칸별 재현 : a .557 · b .758 · c .839 · d .460. 문턱 없는 거짓 지지는 v1.0.0 70 → 38.
+- 보류 42% 의 뿌리는 d 다. 온도를 건 d 확률이 가장 높아도 .671 이라 확신 d 문턱(.99)을 넘는 답이 없다.
+- 도메인별 · 언어별 d 재현 : 이번 판정에서 나눠 재지 않았다(v1.2 때 잰다).
+
+| ood-g1 320쌍 (판정 밖, 참고) | 값 |
+| --- | --- |
+| 3칸 접은 정확도 | .5156 (v1.0.0 .4844 · 차 +.0312 [−.0031, +.0656]) |
+| 보류 | .7031 |
+| d 재현 | .4902 |
+
+- 낯선 글에선 70% 를 사람에게 넘긴다. 학습에 없는 도메인에서 쓸 때는 보류가 많다고 보고 쓴다.
+
 ### 꼬리표 떼기 (손님과의 약속, 2026-10-11)
 
 mem 기억 본문은 `왜 :` · `무엇을 :` 같은 꼬리표로 줄을 시작하는 일이 많다(판정 셋 v3 쌍 문장의 약 25%). 꼬리표는 뜻이 없는 틀이라 **보내기 전에 뗀다.**

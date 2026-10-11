@@ -39,6 +39,7 @@ def parse_args(argv=None):
     p.add_argument("--calibration", default="", help="calibration.json — probs 에 온도를 건다")
     p.add_argument("--public-neutral", choices=list(PUBLIC_NEUTRAL_MODES), default="cd",
                    help="4칸 모델에서 공개 NLI 중립을 채점할 칸 — 학습의 --replay-neutral 과 같게 (기본 cd)")
+    p.add_argument("--protocol", default="", help="규약 파일 (measure/protocol-g1.json) — summary 에 protocol_sha256 을 적는다")
     return p.parse_args(argv)
 
 
@@ -74,8 +75,11 @@ def main(argv=None):
     lab_idx = [i for i, t in enumerate(targets) if t is not None]
     metrics = metrics_from([logits[i] for i in lab_idx], [targets[i] for i in lab_idx],
                            [rows[i].get("kind", "") for i in lab_idx])
+    # set_sha256 · protocol_sha256 은 measure/compare.py · gates.py 가 견준다 (같은 셋 · 같은 규약이 아니면 거부)
+    set_sha = sha256_file(a.pairs)
     summary = {"model": os.path.abspath(a.model), "labels": n_labels, "pairs": os.path.basename(a.pairs),
-               "pairs_sha256": sha256_file(a.pairs), "rows": len(rows), "labeled": len(labeled),
+               "pairs_sha256": set_sha, "set_sha256": set_sha,
+               "protocol_sha256": sha256_file(a.protocol) if a.protocol else None, "rows": len(rows), "labeled": len(labeled),
                "max_len": a.max_len, "truncated": truncated, "temperature": temperature,
                "public_neutral": a.public_neutral, "metrics": metrics}
     with open(os.path.join(a.out_dir, "summary.json"), "w", encoding="utf-8", newline="\n") as f:

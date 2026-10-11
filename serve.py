@@ -1,10 +1,15 @@
-"""JudgeModel NLI 판정 서버 — POST /judge {"evidence","claim"} → {"a","b","c"(,"d"),"model","ms"} · GET /health.
+"""JudgeModel NLI 판정 서버 — POST /judge {"evidence","claim"} → {"a","b","c"(,"d"),"model","ms"} · GET /health · GET /info.
 
 127.0.0.1 에만 붙는다. a 지지 · b 반대 · c 무관 · d 비슷한 계열 확률(온도 적용, 합 1)이고 model 은 학습 가중치
 SHA-256 앞 8자다. 이 응답 꼴이 다른 툴(예: AIMemoryTool 의 NLI 손님)과의 약속이다. 기본은 ONNX Runtime CPU 판이다.
 
 응답 칸은 model.json 의 `letters` 가 정한다 — 3칸 모델(옛 `nli-v1` 꼴)도 4칸 모델(`nli-v2` 꼴)도 같은 서버로 띄운다.
 `--compat3` 은 4칸 모델을 띄우되 d 를 c 에 더해 옛 3칸 꼴(`nli-v1`)로 답한다 — 판올림 전 손님용 물러설 길이다.
+
+1.1.0 opt-in (d 자료층 재구축 설계 6-1) : 요청에 `"label_set": "nli3" | "nli4"` 를 실으면 응답에 `labels` · `model_version` ·
+`label_set` 세 칸이 더 붙는다. 안 실으면 응답은 옛 꼴 그대로다(바이트까지). 3칸으로만 답할 수 있는 서버(3칸 모델 ·
+`--compat3`)는 `nli4` 요청에 3칸으로 답하고 `label_set: "nli3"` 을 싣는다 — 손님은 응답의 `label_set` 을 읽는다.
+모르는 `label_set` 은 400. `GET /info` 는 판 번호 · 칸 세트 · 라벨 이름을 알린다.
 
     python -I serve.py --model ~/.judgemodel/models/nli-studio-v3 --port 8092 --threads 4
     python -I serve.py --model ~/.judgemodel/models/nli-studio-v3 --port 8092 --compat3     # 옛 손님용
@@ -31,6 +36,13 @@ ALL_LETTERS = ["a", "b", "c", "d"]
 LETTERS_V1 = ALL_LETTERS[:3]
 # 응답 꼴 판 이름 — 칸 수로 정한다. model.json 의 protocol 이 있으면 그 값을 쓴다
 PROTOCOLS = {3: "nli-v1", 4: "nli-v2"}
+# 응답 꼴의 판 번호 — label_set opt-in 이 붙은 판. 기본 응답을 4칸으로 바꾸는 날이 2.0.0 이다
+API_VERSION = "1.1.0"
+# 손님이 고르는 칸 세트 → 칸 수. 칸 수 → 세트 이름은 그 거꾸로다
+LABEL_SETS = {"nli3": 3, "nli4": 4}
+SET_OF = {n: name for name, n in LABEL_SETS.items()}
+# model.json 에 labels 가 없는 옛 판의 라벨 이름 (train/data_prep.LABELS 와 같은 차례)
+DEFAULT_LABELS = ["support", "contradict", "unrelated", "related"]
 
 
 def load_spec(model_dir):
@@ -54,7 +66,23 @@ def load_spec(model_dir):
     spec["_temperature"] = temperature
     spec["_letters"] = spec_letters(spec, model_dir)
     spec["_protocol"] = spec.get("protocol") or PROTOCOLS[len(spec["_letters"])]
+    check_release_meta(spec, model_dir)
     return spec
+
+
+def check_release_meta(spec, model_dir=""):
+    """1.1.0 메타(model_version · label_set)를 확인한다. 옛 model.json 에는 둘 다 없고 그대로 읽힌다.
+
+    label_set 이 칸 수와 어긋나면 멈춘다 — 손님에게 「nli4」 라 해 놓고 3칸을 내면 안 된다.
+    """
+    version = spec.get("model_version")
+    if version is not None and not (isinstance(version, str) and version):
+        raise SystemExit(f"model.json model_version 이 비었거나 글이 아니다: {version!r} ({model_dir})")
+    label_set = spec.get("label_set")
+    want = SET_OF[len(spec["_letters"])]
+    if label_set is not None and label_set != want:
+        raise SystemExit(f"model.json label_set {label_set!r} 이 칸 수 {len(spec['_letters'])} 과 다르다 "
+                         f"(기대 {want!r}, {model_dir})")
 
 
 def spec_letters(spec, model_dir=""):
@@ -74,6 +102,13 @@ class Compat3:
     def probs(self, evidence, claim):
         p = self.inner.probs(evidence, claim)
         return [p[0], p[1], p[2] + p[3]]
+
+
+def fit_label_set(p, want_n):
+    """확률을 요청 세트 칸 수에 맞춘다. 4칸을 3칸으로 줄일 때만 d 를 c 에 더한다 — 늘릴 수는 없으니 그대로 둔다."""
+    if want_n == 3 and len(p) == 4:
+        return [p[0], p[1], p[2] + p[3]]
+    return list(p)
 
 
 def softmax(logits, temperature):
@@ -140,14 +175,32 @@ class TorchNLI:
         return softmax(self.logits(evidence, claim), self.temperature)
 
 
-def make_handler(judge, model_id, backend, name, letters=None, protocol=None):
-    """letters 가 None 이면 옛 3칸 꼴이고 /health 에 letters · protocol 칸을 안 붙인다 (옛 시험·손님 그대로)."""
+def make_info(model_id, name, letters, protocol, labels, model_version, label_guide):
+    """GET /info 몸통 — 판 번호 · 이 서버가 답할 수 있는 칸 세트 · 라벨 이름."""
+    served = len(letters)
+    return {"api_version": API_VERSION, "model_version": model_version, "model": model_id, "name": name,
+            "protocol": protocol, "label_guide": label_guide, "default_label_set": SET_OF[served],
+            "label_sets": {s: {"letters": ALL_LETTERS[:n], "labels": labels[:n]}
+                           for s, n in LABEL_SETS.items() if n <= served},
+            "id2label": {str(i): label for i, label in enumerate(labels[:served])}}
+
+
+def make_handler(judge, model_id, backend, name, letters=None, protocol=None, labels=None, model_version=None,
+                 label_guide=None):
+    """letters 가 None 이면 옛 3칸 꼴이고 /health 에 letters · protocol 칸을 안 붙인다 (옛 시험·손님 그대로).
+
+    labels 는 model.json 의 라벨 이름(비면 DEFAULT_LABELS), model_version 은 비면 model_id 다 — opt-in 응답과 /info 에만 쓴다.
+    """
     lock = threading.Lock()  # 한 번에 한 판 — 스레드 수는 --threads 가 정한다
     reply_letters = letters or LETTERS_V1
     health = {"ok": True, "model": model_id, "backend": backend, "name": name}
     if letters is not None:
         health["letters"] = list(letters)
         health["protocol"] = protocol or PROTOCOLS[len(letters)]
+    all_labels = list(labels or DEFAULT_LABELS)
+    version = model_version or model_id
+    info = make_info(model_id, name, reply_letters, protocol or PROTOCOLS[len(reply_letters)], all_labels, version,
+                     label_guide)
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -169,10 +222,12 @@ def make_handler(judge, model_id, backend, name, letters=None, protocol=None):
             self.wfile.write(data)
 
         def do_GET(self):
-            if self.path != "/health":
+            if self.path == "/health":
+                self.reply(200, health)
+            elif self.path == "/info":
+                self.reply(200, info)
+            else:
                 self.reply(404, {"error": "not found"})
-                return
-            self.reply(200, health)
 
         def do_POST(self):
             if self.path != "/judge":
@@ -197,6 +252,10 @@ def make_handler(judge, model_id, backend, name, letters=None, protocol=None):
                     or not isinstance(req.get("claim"), str):
                 self.reply(400, {"error": "need evidence and claim strings"})
                 return
+            want = req.get("label_set")
+            if want is not None and not (isinstance(want, str) and want in LABEL_SETS):
+                self.reply(400, {"error": "unknown label_set"})
+                return
             start = time.perf_counter()
             try:
                 with lock:
@@ -209,16 +268,24 @@ def make_handler(judge, model_id, backend, name, letters=None, protocol=None):
             if len(p) != len(reply_letters) or not all(math.isfinite(float(v)) for v in p):
                 self.reply(500, {"error": "bad probabilities"})
                 return
-            body = {letter: round(float(v), 6) for letter, v in zip(reply_letters, p)}
+            if want is not None:
+                p = fit_label_set(p, LABEL_SETS[want])
+            body = {letter: round(float(v), 6) for letter, v in zip(ALL_LETTERS, p)}
             body["model"] = model_id
             body["ms"] = round(ms, 1)
+            if want is not None:
+                # opt-in 손님에게만 세 칸을 더 붙인다 — 실제로 답한 칸 수가 label_set 을 정한다
+                body["labels"] = all_labels[:len(p)]
+                body["model_version"] = version
+                body["label_set"] = SET_OF[len(p)]
             self.reply(200, body)
 
     return Handler
 
 
-def make_server(judge, model_id, backend, name, port, letters=None, protocol=None):
-    return ThreadingHTTPServer((HOST, port), make_handler(judge, model_id, backend, name, letters, protocol))
+def make_server(judge, model_id, backend, name, port, letters=None, protocol=None, **meta):
+    """meta 는 make_handler 의 labels · model_version · label_guide 다."""
+    return ThreadingHTTPServer((HOST, port), make_handler(judge, model_id, backend, name, letters, protocol, **meta))
 
 
 def serving_shape(spec, compat3):
@@ -259,7 +326,9 @@ def main():
         judge = Compat3(judge)
     print(f"{spec.get('name', '?')} {a.backend} 판 · 모델 {model_id} · T {spec['_temperature']} · "
           f"응답 {protocol} {''.join(letters)} · 올림 {time.time() - t0:.1f}s · http://{HOST}:{a.port}", flush=True)
-    server = make_server(judge, model_id, a.backend, spec.get("name", ""), a.port, letters, protocol)
+    server = make_server(judge, model_id, a.backend, spec.get("name", ""), a.port, letters, protocol,
+                         labels=spec.get("labels"), model_version=spec.get("model_version"),
+                         label_guide=spec.get("label_guide"))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -9,7 +9,9 @@
 
 torch · transformers · onnx · onnxruntime 이 든 venv 에서 돈다. 입력은 input_ids · attention_mask(int64),
 출력은 logits [batch, 칸 수] (온도 전). 칸 수는 모델 머리에서 읽는다 — 3칸(`nli-v1` 꼴) · 4칸(`nli-v2` 꼴) 둘 다 내보내고,
-model.json 의 labels · letters · protocol · label_guide 를 그 칸 수에 맞춰 적는다 (판정 넷 확장 설계 2-2). 몸통(klue roberta · XLM-R)은 type_vocab_size 1 이라 token_type_ids 를 안 넣는다 —
+model.json 의 labels · letters · protocol · label_guide · label_set(nli3/nli4) 을 그 칸 수에 맞춰 적는다 (판정 넷 확장 설계 2-2).
+`--model-version 1.1.0` 은 model.json 의 model_version 칸이 된다 — 서버의 opt-in 응답이 싣는 판 번호다 (d 자료층 재구축 설계 6-1).
+몸통(klue roberta · XLM-R)은 type_vocab_size 1 이라 token_type_ids 를 안 넣는다 —
 1 보다 크면 내보내지 않고 멈춘다 (pairenc.check_no_token_types).
 가중치가 2GB 를 넘으면(XLM-R large fp32 2.24GB) protobuf 한도 때문에 torch 가 가중치를 낱개 파일 수백 개로 흩뜨린다 —
 그때는 `model.onnx`(그래프) + `model.onnx.data`(가중치 한 파일) 둘로 모으고 model.json 에 둘의 SHA 를 다 적는다
@@ -35,6 +37,8 @@ OPSET = 17
 FORMAT = 1
 # 칸 수 → (응답 꼴 판 이름, 라벨 기준 글 판). 서버 · 손님이 이 이름으로 옛 판과 새 판을 가른다
 PROTOCOLS = {3: ("nli-v1", "support-v3"), 4: ("nli-v2", "support-v4")}
+# 칸 수 → 손님이 opt-in 으로 고르는 칸 세트 이름 (serve.LABEL_SETS 와 같은 이름, d 자료층 재구축 설계 6-1)
+LABEL_SET_NAMES = {3: "nli3", 4: "nli4"}
 ONNX_DATA = "model.onnx.data"
 TORCH_FILES = ("config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json",
                "special_tokens_map.json", "vocab.txt", "sentencepiece.bpe.model")
@@ -228,6 +232,8 @@ def build_spec(a, weights_sha, onnx_sha, tok_sha, calibration, train_info, paren
         "input": {"pair": pair or "[CLS] evidence [SEP] claim [SEP]", "names": ["input_ids", "attention_mask"],
                   "max_len": max_len, "truncation": "only_first", "keep": "evidence head"},
         "protocol": protocol, "label_guide": guide,
+        # 1.1.0 메타 — 서버가 opt-in 응답의 model_version · label_set 으로 싣는다. 비면 서버가 가중치 SHA 앞 8자를 쓴다
+        "model_version": getattr(a, "model_version", "") or None, "label_set": LABEL_SET_NAMES[num_labels],
         "labels": LABELS[:num_labels], "letters": LETTERS[:num_labels], "source_labels": SOURCE_LABELS[:num_labels],
         "calibration": {"temperature": (calibration or {}).get("temperature", 1.0),
                         "file": "calibration.json" if calibration else None},
@@ -261,6 +267,8 @@ def parse_args(argv=None):
     p.add_argument("--with-torch", action="store_true", help="torch/ 에 HF 가중치를 같이 둔다 (serve --backend torch)")
     p.add_argument("--threads", type=int, default=8)
     p.add_argument("--label-guide", default="", help="라벨 기준 글 판 (비면 3칸 support-v3 · 4칸 support-v4)")
+    p.add_argument("--model-version", default="",
+                   help="릴리스 판 번호 (예: 1.1.0). opt-in 응답 · /info 의 model_version 이 된다")
     return p.parse_args(argv)
 
 

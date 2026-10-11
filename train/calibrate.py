@@ -236,6 +236,22 @@ def read_pred(path):
     return rows
 
 
+def calib_set_sha(a):
+    """문턱을 고른 셋의 해시 — --fitted-on 이 있으면 그 셋, 없으면 pred 옆 summary.json 의 set_sha256 (없으면 None).
+
+    measure/gates.py 는 이 해시가 잴 셋과 같으면 거부한다 (문턱 고른 셋으로 관문을 재지 않게).
+    None 이면 main 이 거부한다 — 해시 없이 쓰면 gates 가 그 검사를 못 한다.
+    """
+    if a.fitted_on:
+        with open(a.fitted_on, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    summary = os.path.join(os.path.dirname(os.path.abspath(a.pred)), "summary.json")
+    if not os.path.isfile(summary):
+        return None
+    with open(summary, encoding="utf-8") as f:
+        return json.load(f).get("set_sha256")
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="온도 · 문턱 고르기 (dev 로만)")
     p.add_argument("--pred", required=True, help="eval_nli.py 쌍별 출력 jsonl (logits · label)")
@@ -250,16 +266,23 @@ def parse_args(argv=None):
 def main(argv=None):
     sys.stdout.reconfigure(encoding="utf-8")
     a = parse_args(argv)
+    set_sha = calib_set_sha(a)
+    if not set_sha:
+        print("거부: 문턱 고른 셋의 해시를 모른다 — --pred 옆 summary.json 에 set_sha256 이 없다. "
+              "--fitted-on <dev 셋 jsonl> 을 준다", file=sys.stderr)
+        return 2
     rows = read_pred(a.pred)
     out = calibrate(rows, a.temperature_only, a.false_support_share)
     fitted = a.fitted_on or a.pred
     with open(fitted, "rb") as f:
         out["fitted_on"] = {"file": os.path.basename(fitted), "sha256": hashlib.sha256(f.read()).hexdigest()}
+    out["calib_set_sha256"] = set_sha
     with open(a.out, "w", encoding="utf-8", newline="\n") as f:
         json.dump(out, f, ensure_ascii=False, indent=1)
         f.write("\n")
     print(json.dumps(out, ensure_ascii=False, indent=1))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -98,6 +98,8 @@ def parse_args(argv=None):
                    help="바퀴마다 다른 파일 — {epoch} 자리에 1부터 바퀴 번호 (KorNLI 표본)")
     p.add_argument("--replay", default="", help="잊음 막기 replay 풀 (KLUE 학습 jsonl)")
     p.add_argument("--mix-klue", default="1:1", help="--train 쌍 : replay 쌍 비율 (2:1 = replay 를 반으로)")
+    p.add_argument("--replay-n", type=positive_int, default=None,
+                   help="바퀴마다 replay 쌍 수를 이 값으로 고정 (--mix-klue 비례 대신) — 짝 비교에서 기준 판 값에 묶는다")
     p.add_argument("--replay-neutral", choices=["cd", "c"], default="cd",
                    help="4칸 학습에서 replay 의 공개 출처 중립을 무엇으로 배우나 — cd = 합친 칸 손실(옛 동작) · "
                         "c = c 로 고정 (넷칸 보강 R1). --train 쪽 want `cd` 줄은 그대로 합친 칸")
@@ -120,6 +122,9 @@ def parse_args(argv=None):
     p.add_argument("--eps", type=float, default=1e-6)
     p.add_argument("--betas", default="0.9,0.98")
     p.add_argument("--seed", type=int, default=1)
+    p.add_argument("--deterministic", action="store_true",
+                   help="결정 모드 — 같은 씨앗이면 같은 가중치가 나오게 GPU 커널을 고정한다 (cudnn deterministic · "
+                        "benchmark 끔 · use_deterministic_algorithms(warn_only) · CUBLAS_WORKSPACE_CONFIG). 10~20%% 느릴 수 있다")
     p.add_argument("--max-len", type=int, default=128)
     p.add_argument("--eval-every", type=int, default=2000, help="스텝마다 dev (0 = 바퀴 끝만)")
     p.add_argument("--ckpt-every", type=int, default=1000)
@@ -151,6 +156,8 @@ def parse_args(argv=None):
         p.error(f"--class-weight-scale : {e}")
     if args.weight_scale and not args.class_weight:
         p.error("--class-weight-scale 는 --class-weight 와 같이 쓴다")
+    if args.replay_n is not None and not args.replay:
+        p.error("--replay-n 은 --replay 와 같이 쓴다")
     if args.select is None:
         args.select = "last" if args.stage == "studio" else "base"
     return args
@@ -165,14 +172,28 @@ def load_rows(path):
     return kept, len(rows) - len(kept)
 
 
+def positive_int(text):
+    """argparse type — 1 이상 정수만. 0 이하 --replay-n 은 replay 를 조용히 끄거나 뒤집으니 인자에서 막는다."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"정수가 아니다: {text}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"1 이상이어야 한다: {value}")
+    return value
+
+
 def parse_ratio(text):
     main_part, replay_part = text.split(":", 1)
     return float(main_part), float(replay_part)
 
 
 def replay_count(args, n_main):
+    """바퀴마다 뽑을 replay 수 — --replay-n 이 있으면 그 수(짝 비교에서 「하나만 더함」을 지키게), 없으면 --mix-klue 비례."""
     if not args.replay:
         return 0
+    if getattr(args, "replay_n", None) is not None:
+        return args.replay_n
     main_part, replay_part = parse_ratio(args.mix_klue)
     return int(round(n_main * replay_part / main_part))
 
@@ -523,6 +544,20 @@ class Watch:
                 "min_mem_available_mb": self.min_avail, "swap_delta_mb": delta}
 
 
+def set_deterministic():
+    """결정 모드를 켠다. CUDA(ROCm) 핸들을 만들기 전에 불러야 CUBLAS_WORKSPACE_CONFIG 가 먹는다.
+
+    자료 차례(make_batches · replay 표본)는 원래 random.Random(씨앗) 이라 따로 고정할 것이 없다 — DataLoader 를 안 쓴다.
+    warn_only 라 결정 구현이 없는 연산은 멈추지 않고 경고만 낸다 (로그에서 UserWarning 으로 본다).
+    """
+    # 이미 값이 있으면 안 덮는다 — deterministic 재현은 그 값에 달린다 (판을 다시 돌릴 땐 같은 값을 준다)
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    log(f"결정 모드 켬 CUBLAS_WORKSPACE_CONFIG={os.environ['CUBLAS_WORKSPACE_CONFIG']}")
+
+
 def versions():
     import tokenizers
     import transformers
@@ -616,6 +651,9 @@ class Run:
         if args.replay:
             self.replay_pool, dropped = load_rows(args.replay)
             self.dropped += dropped
+            if args.replay_n is not None and args.replay_n > len(self.replay_pool):
+                # 풀 크기로 조용히 깎이면 짝 비교의 「replay 수 고정」이 깨진다
+                raise SystemExit(f"--replay-n {args.replay_n} 이 replay 풀 {len(self.replay_pool)} 쌍보다 크다")
             self.check_replay_neutral()
         self.dev_items = []
         if args.dev:
@@ -685,7 +723,8 @@ class Run:
         if args.replay:
             entry = data_entry(args.replay, self.replay_pool, 0)
             per_epoch = min(replay_count(args, len(self.main_rows)), len(self.replay_pool))
-            entry["replay"] = {"mix": args.mix_klue, "per_epoch": per_epoch, "neutral": args.replay_neutral}
+            entry["replay"] = {"mix": args.mix_klue, "per_epoch": per_epoch, "neutral": args.replay_neutral,
+                               "fixed_n": args.replay_n}
             data.append(entry)
         st = self.state
         elapsed = max(1e-9, time.time() - st["started"])
@@ -704,7 +743,8 @@ class Run:
                         "mix_klue": args.mix_klue if args.replay else None, "new_head": args.new_head,
                         "grow_head": args.grow_head or None,
                         "total_steps": self.total_steps},
-            "seed": st["seed"], "restarts": st["restarts"], "steps": st["step"],
+            "seed": st["seed"], "deterministic": bool(getattr(args, "deterministic", False)),
+            "restarts": st["restarts"], "steps": st["step"],
             "sec_per_step": round(elapsed / max(1, st["step"]), 4),
             "pairs_per_min": round(st["step"] * args.batch * args.accum / elapsed * 60, 1),
             **self.watch.summary(),
@@ -991,6 +1031,8 @@ def main(argv=None):
     _log_file = open(os.path.join(args.out, "train.log"), "a", encoding="utf-8")
     if args.device == "cpu":
         torch.set_num_threads(args.threads)
+    if args.deterministic:
+        set_deterministic()
     if args.smoke:
         torch.set_num_threads(min(args.threads, 4))
         return run_smoke(args)

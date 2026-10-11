@@ -1,7 +1,8 @@
 ﻿<#
 JudgeModel 판정 서버를 띄운다 (Windows · 127.0.0.1).
 
-- 모델 : ~/.judgemodel/models/nli-studio-v2 (blind 332 통과판, 2026-10-09)
+- 모델 : ~/.judgemodel/models/nli-studio-v4 (v1.1.0 · 3칸 개선판, 2026-10-11) · 되돌릴 땐 `-Model ~\.judgemodel\models\nli-studio-v2`
+- 기본은 --compat3 를 붙여 v1.0.0 과 같은 3칸 꼴로 답한다. `-Compat3:$false` 면 4칸 기본.
 - 8092 에 이미 무엇이 떠 있으면 새로 띄우지 않고 /health 만 찍고 끝낸다.
 - 서버는 창 없는 python 프로세스로 남고, 로그는 ~/.judgemodel/logs/serve-studio.{log,err} 에 쌓인다.
 
@@ -10,7 +11,8 @@ JudgeModel 판정 서버를 띄운다 (Windows · 127.0.0.1).
   .\serve-studio.ps1 -Unregister
 #>
 param(
-    [string]$Model = (Join-Path $HOME ".judgemodel\models\nli-studio-v2"),
+    [string]$Model = (Join-Path $HOME ".judgemodel\models\nli-studio-v4"),
+    [bool]$Compat3 = $true,      # -Compat3:$false 면 4칸 기본
     [int]$Port = 8092,
     [int]$Threads = 4,
     [string]$Python = "",
@@ -69,8 +71,10 @@ New-Item -ItemType Directory -Force $logDir | Out-Null
 $log = Join-Path $logDir "serve-studio.log"
 $err = Join-Path $logDir "serve-studio.err"
 
+$pyArgs = @("-I", "`"$ServePy`"", "--model", "`"$Model`"", "--port", $Port, "--threads", $Threads)
+if ($Compat3) { $pyArgs += "--compat3" }   # 4칸 모델을 v1.0.0 과 같은 3칸 꼴로
 $p = Start-Process -FilePath $Python -WindowStyle Hidden -PassThru `
-    -ArgumentList @("-I", "`"$ServePy`"", "--model", "`"$Model`"", "--port", $Port, "--threads", $Threads) `
+    -ArgumentList $pyArgs `
     -RedirectStandardOutput $log -RedirectStandardError $err
 
 # 모델(2.2GB)을 올리는 데 몇 초 걸린다. /health 가 답할 때까지 최대 90초 기다린다.
