@@ -1,0 +1,60 @@
+{
+ "name": "protocol-g2",
+ "design": "Docs/Design/2026-10-12-v1.2-B판설계.md 2-2 · 2-3 · 3-3",
+ "hash_rule": "이 파일 바이트의 sha256 을 모든 결과(eval summary.json · compare · gates · prereg)에 protocol_sha256 으로 적는다. 첫 비교 전에 커밋하고, 고치려면 protocol-g3.json 새 판을 만든다 (이 파일은 첫 비교 뒤 안 고친다). protocol-g1.json 은 그대로 둔다.",
+ "label_guide": "support-v6",
+ "label_guide_note": "새 쌍과 v6 자리 규칙(rule_filter.py)에 걸린 옛 g1 쌍 380 은 v6 판정. 규칙에 안 걸린 옛 쌍은 v5 라벨을 그대로 옮겼다(v6 는 v5 에 자리 규칙 넷만 더한 판). 줄의 g2_label 칸 : v6-new · v6-relabel · v5-carry",
+ "seeds": [1, 2, 3, 4, 5],
+ "seeds_note": "protocol-g1 과 같다 — 씨앗 5 · 결정 모드(train_nli --deterministic)",
+ "seed_rerun": 1,
+ "ckpt": "last",
+ "release_pick": {"rule": "closest_to_mean", "metric": "b_recall", "set": "dev-cmp-g2", "tie": "acc3 높은 판 · 그다음 씨앗 작은 판"},
+ "bootstrap": {"n": 10000, "ci": 0.95, "rng_seed": 20261011, "resample": "group", "seeds": "고정 — 씨앗은 다시 뽑지 않는다"},
+ "group_key": "group",
+ "majority": "씨앗 중 과반이 맞혀야 맞힘 (맞힌 수 × 2 > 씨앗 수) — McNemar 입력",
+ "calibrate_on": "dev-cal-g2",
+ "compare_on": "dev-cmp-g2",
+ "sets": {
+  "dev-cal-g2": "7f6f78064d2f1c1140526a0d97f68225e9d0633cb0b9624d745f79bac34c5713",
+  "dev-cmp-g2": "9571f4d9f849124b473615d910044d27c2de933eb0cf0f0c59b074c8590cd532",
+  "blind-g2": "c015b039b7c7ecd4f2aa631d0d06ac5eda954734d0460f4aea87fbce5ad8e5e2"
+ },
+ "sets_note": "blind-g2 해시는 blind-g2 를 얼린 뒤 한 번 채우고 커밋한다 (첫 비교 전). TODO 값이 남아 있으면 gates.py release 는 어떤 셋이든 해시가 다르다며 거부한다 — 자리 비움을 일부러 막는 값이다. ood-g1 은 보고만 하는 셋이라 protocol-g1 해시 그대로 다시 쓴다. blind-g2 990쌍 a271·b340·c180·d199, 보강 전 1705b799… 는 안 씀",
+ "report_only_sets": {"ood-g1": "6584a3176e672d1543246b39ca3eef4a411f034298cbfeef905089562880372c"},
+ "side": {"mnli": "mnli-devm2000", "klue": "klue-dev", "k48": "k48"},
+ "pair_gate": {
+  "base": "B2",
+  "new": "B4",
+  "target": {"metric": "b_recall", "min_mean_diff": 0.04, "ci_low_gt": 0.0},
+  "guards": [
+   {"metric": "acc3", "ci_low_ge": -0.02},
+   {"metric": "a_recall", "ci_low_ge": -0.03},
+   {"metric": "c_recall", "ci_low_ge": -0.03},
+   {"metric": "d_recall", "ci_low_ge": -0.03},
+   {"metric": "false_support", "max_ratio": 1.2},
+   {"metric": "side_acc3", "sides": ["mnli", "klue"], "min_mean_diff": -0.010}
+  ],
+  "alarms": [
+   {"metric": "k48_hits", "min": 40},
+   {"metric": "lang_b_recall", "lang": "ko", "min_mean_diff": -0.03}
+  ],
+  "report_only": ["by domain · lang b_recall", "d_to_a", "a_to_d", "unsure (dev-cal-g2 문턱)", "d sure precision (dev-cal-g2 문턱)"],
+  "verdicts": {"먹힘": "목표 충족 · 지킴 다 통과", "같다": "목표 못 미침 (더한 것을 뺀다)", "지킴 깨짐": "지킴 하나라도 미달", "보류": "목표 충족인데 지킴 중 잴 수 없는 것이 있음 (곁 자 없음 등)"}
+ },
+ "release_gate": {
+  "set": "blind-g2",
+  "ref_model": "v1.1.0",
+  "b_recall_min": 0.80,
+  "vs_ref": [
+   {"metric": "b_recall", "ci_low_gt": 0.0},
+   {"metric": "acc3", "ci_low_ge": -0.02},
+   {"metric": "a_recall", "ci_low_ge": -0.03},
+   {"metric": "c_recall", "ci_low_ge": -0.03},
+   {"metric": "d_recall", "ci_low_ge": -0.03}
+  ],
+  "sure_false_support_share_max": 0.015,
+  "unsure_vs_ref_max_diff": 0.03,
+  "p95_ms_max": 1000.0,
+  "note": "protocol-g1 의 절대 자(acc3 ≥ .85 · d ≥ .70 · d 확신 정밀 ≥ .80 · 보류 ≤ .30)는 「v1.1.0 대비 안 나빠짐」으로 바꿨다 (설계 8절 ④). vs_ref 는 같은 쌍 차의 묶음 붓스트랩 95% 아래끝"
+ }
+}

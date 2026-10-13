@@ -1,0 +1,74 @@
+{
+ "name": "protocol-g3",
+ "draft_note": "초안 → 2026-10-13 채움(assemble_g3.py protocol). sets 해시는 measure/sets-g3.md 14-2",
+ "design": "Docs/Design/2026-10-13-v1.2-한국어b보강판설계.md 2-2 · 2-4 · 5-1 · 5-4",
+ "hash_rule": "이 파일 바이트의 sha256 을 모든 결과(eval summary.json · compare · gates · prereg)에 protocol_sha256 으로 적는다. 첫 비교 전에 커밋하고, 고치려면 protocol-g4.json 새 판을 만든다 (이 파일은 첫 비교 뒤 안 고친다). protocol-g1 · g2 는 그대로 둔다.",
+ "label_guide": "support-v6",
+ "label_guide_note": "g3 = g2 + 새 한국어 쌍. 옛 g2 쌍 라벨은 그대로(v6), 새 쌍은 v6 두 판 판정(label_batches.py)",
+ "seeds": [1, 2, 3, 4, 5],
+ "seeds_note": "protocol-g2 와 같다 — 씨앗 5 · 결정 모드(train_nli --deterministic) · 시작점 runs/base-2/ckpt-best",
+ "seed_rerun": 1,
+ "ckpt": "last",
+ "release_pick": {"rule": "closest_to_mean", "metric": "b_recall", "lang": "ko", "set": "dev-cmp-g3", "tie": "acc3(쌍 전체) 높은 판 · 그다음 씨앗 작은 판"},
+ "bootstrap": {"n": 10000, "ci": 0.95, "rng_seed": 20261011, "resample": "group", "seeds": "고정 — 씨앗은 다시 뽑지 않는다"},
+ "group_key": "group",
+ "majority": "씨앗 중 과반이 맞혀야 맞힘 (맞힌 수 × 2 > 씨앗 수) — McNemar 입력",
+ "calibrate_on": "dev-cal-g3",
+ "compare_on": "dev-cmp-g3",
+ "sets": {
+  "dev-cal-g3": "7f9a2f1d89bbf9f1d38f5d59e252d2388a26d9da54f8b0a49f27dd0490ec2c6c",
+  "dev-cmp-g3": "e81ab88fff81fd3ef9b186514e73e3c48b76b4f63d7c608753df3c40ca3a3a82",
+  "blind-g3": "b30e64b74e4584e3e3b3ff2609ac483bbe52610c891aecffc05b8dbef7532bf2"
+ },
+ "sets_note": "dev-cmp-g3 = dev-cmp-g2 + 새 ko b 약 200 (ko b 약 300) · dev-cal-g3 = dev-cal-g2 + ko b 약 50 · blind-g3 새로 약 1,000쌍 (ko b ≥ 250 · en b 약 150). TODO- 값이 남아 있으면 compare · gates 는 어떤 셋이든 해시가 다르다며 거부한다. ood-g1 은 보고만 하는 셋이라 protocol-g1 해시 그대로",
+ "report_only_sets": {"ood-g1": "6584a3176e672d1543246b39ca3eef4a411f034298cbfeef905089562880372c"},
+ "train_sets": {"train-g3-ko": "4a1025aa859f4975b01cbce8abd9a4dc747a6c6d55c4a0e015a3b4fc9e92018a"},
+ "train_sets_note": "K 판에 더하는 학습 층 (~/.judgemodel/sets/g3/train-g3-ko.jsonl 2,644쌍, FROZEN-train-g3-ko.sha256). 재는 셋이 아니라 compare · gates 는 안 읽는다 — 학습 입력이 바뀌지 않았는지 맞춰 보는 자리. 학습 · 합성 · 덧학습 금지 목록 : sets/g3/blind-g3.forbid.json",
+ "side": {"mnli": "mnli-devm2000", "klue": "klue-dev", "k48": "k48"},
+ "pair_gate": {
+  "base": "B2",
+  "base_note": "갈래 ② (B 판 blind-g2 미달 · 2026-10-13) — 기준 판은 B2 씨앗 다섯, K = B2 처방 + train-g3-ko",
+  "new": "K",
+  "slice_note": "lang · domain 칸이 달린 자는 셋 줄의 그 칸이 같은 쌍만으로 센다 (compare.py ruler_name — 이름 b_recall@ko · b_recall@mem·ko)",
+  "target": {"metric": "b_recall", "lang": "ko", "min_mean_diff": 0.05, "ci_low_gt": 0.0},
+  "guards": [
+   {"metric": "b_recall", "lang": "en", "ci_low_ge": -0.03},
+   {"metric": "b_recall", "ci_low_ge": -0.02},
+   {"metric": "acc3", "ci_low_ge": -0.02},
+   {"metric": "a_recall", "ci_low_ge": -0.03},
+   {"metric": "c_recall", "ci_low_ge": -0.03},
+   {"metric": "d_recall", "ci_low_ge": -0.03},
+   {"metric": "false_support", "max_ratio": 1.2},
+   {"metric": "side_acc3", "sides": ["mnli", "klue"], "min_mean_diff": -0.010}
+  ],
+  "alarms": [
+   {"metric": "k48_hits", "min": 40},
+   {"metric": "b_recall", "domain": "mem", "lang": "ko", "min_mean_diff": -0.03},
+   {"metric": "a_recall", "lang": "ko", "min_mean_diff": -0.03}
+  ],
+  "report_only": ["by domain · lang b_recall (원천별 ko b)", "ko d_recall", "a_to_b · d_to_b", "잣대 3쌍 b 확률", "use1 ② 놓친 b 7쌍", "unsure (dev-cal-g3 문턱)", "d sure precision (dev-cal-g3 문턱)"],
+  "verdicts": {"먹힘": "목표 충족 · 지킴 다 통과", "같다": "목표 못 미침 (접고 길 C 로)", "지킴 깨짐": "지킴 하나라도 미달 → K-h 한 번 (설계 5-3)", "보류": "목표 충족인데 지킴 중 잴 수 없는 것이 있음 (곁 자 없음 등)", "판별 불가": "기준선 ko b 씨앗 평균 짝 반폭 > .04 — compare 가 내지 않는다, 메인 판단 (설계 5-2)"}
+ },
+ "release_gate": {
+  "set": "blind-g3",
+  "ref_model": "v1.1.0",
+  "ref_model_note": "갈래 ② — v1.1.0 = runs/g1-B2-s3/ckpt-best (가중치 sha256 14d0d520…)",
+  "b_recall_min": [
+   {"metric": "b_recall", "min": 0.80},
+   {"metric": "b_recall", "lang": "ko", "min": 0.70}
+  ],
+  "vs_ref": [
+   {"metric": "b_recall", "lang": "ko", "ci_low_gt": 0.0},
+   {"metric": "b_recall", "ci_low_ge": -0.02},
+   {"metric": "b_recall", "lang": "en", "ci_low_ge": -0.03},
+   {"metric": "acc3", "ci_low_ge": -0.02},
+   {"metric": "a_recall", "ci_low_ge": -0.03},
+   {"metric": "c_recall", "ci_low_ge": -0.03},
+   {"metric": "d_recall", "ci_low_ge": -0.03}
+  ],
+  "sure_false_support_share_max": 0.015,
+  "unsure_vs_ref_max_diff": 0.03,
+  "p95_ms_max": 1000.0,
+  "note": "b_recall_min 은 절대 자 목록 (쌍 전체 b ≥ .80 · ko b ≥ .70). vs_ref 는 같은 쌍 차의 묶음 붓스트랩 95% 아래끝 — ko b 는 > 0, en b 는 ≥ −3%p (설계 2-4)"
+ }
+}
