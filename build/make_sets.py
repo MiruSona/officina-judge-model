@@ -12,6 +12,7 @@
     python -I make_sets.py reserve-g2 --build <build>/g2           # v1.2 B 판 b 자 예약 · 학습 층
     python -I make_sets.py check-g2   --build <build>/g2
     python -I make_sets.py reserve-g3 --build <build>/g3           # v1.2 K 판 g3 평가 셋 새 쌍 예약 · 학습 층
+    python -I make_sets.py reserve-g4 --build <build>/g4 [--force] # v1.2 K2 판 blind-g4 · dev-cmp-g4 새 c 예약
 """
 import argparse
 import collections
@@ -23,6 +24,7 @@ import os
 import random
 import re
 import sys
+import time
 import unicodedata
 
 SEED = 20261011
@@ -523,8 +525,10 @@ def _spread_pick(rows, n, per_group, rng):
     return picked
 
 
-def near_c(rows, n, rng, per_group, prefix, claim_rows=None):
-    """같은 셋 · 같은 원천 예약 묶음끼리 근접 c : 묶음 A 의 근거 × 다른 묶음 B 의 주장(BM25 10~60위). groups 에 둘 다."""
+def near_c(rows, n, rng, per_group, prefix, claim_rows=None, split="eval", origin="g1-eval", hash_id=False):
+    """같은 셋 · 같은 원천 예약 묶음끼리 근접 c : 묶음 A 의 근거 × 다른 묶음 B 의 주장(BM25 10~60위). groups 에 둘 다.
+    split · origin 은 줄 칸에 그대로 적는다 (g4 학습 층은 train · g4-train).
+    hash_id 면 id 꼬리에 `-h<쌍 sha_key 앞 8자>` — 다시 뽑아 입력이 바뀌어도 옛 판정이 다른 쌍에 안 붙는다(g4)."""
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:                     # python -I 는 스크립트 폴더를 import 길에 안 넣는다
         sys.path.insert(0, here)
@@ -562,11 +566,14 @@ def near_c(rows, n, rng, per_group, prefix, claim_rows=None):
         other = claims[i]
         per_group[ev["group"]] += 1
         lic = ev.get("lic", "") if ev.get("lic") == other.get("lic") else f"{ev.get('lic', '')}+{other.get('lic', '')}"
-        out.append({"id": f"{prefix}{len(out) + 1:04d}", "evidence": ev["evidence"], "claim": other["claim"],
+        rid = f"{prefix}{len(out) + 1:04d}"
+        if hash_id:
+            rid += "-h" + sha_key({"evidence": ev["evidence"], "claim": other["claim"]})[:8]
+        out.append({"id": rid, "evidence": ev["evidence"], "claim": other["claim"],
                     "want": "", "hint": "c", "form": NEAR_C, "domain": ev.get("domain", ""), "group": ev["group"],
                     "groups": sorted(mine | set(other["groups"])), "lang": ev.get("lang", ""), "lic": lic,
-                    "split": "eval", "src_ids": list(ev.get("src_ids", [])) + list(other.get("src_ids", [])),
-                    "origin": "g1-eval", "near_rank": rank})
+                    "split": split, "src_ids": list(ev.get("src_ids", [])) + list(other.get("src_ids", [])),
+                    "origin": origin, "near_rank": rank})
     return out
 
 
@@ -1560,7 +1567,7 @@ def check_g2(eval_rows, train_rows, forbid):
 
 
 def _g2_forbid(args):
-    root = args.old_root or os.path.join(os.path.expanduser("~"), ".judgemodel")
+    root = os.path.expanduser(args.old_root) if args.old_root else os.path.join(os.path.expanduser("~"), ".judgemodel")
     return G2Forbid(root, args.g1_build or os.path.join(root, "build", "g1"),
                     args.use1 or os.path.join(root, "measure", "use1"),
                     args.ruler_ids or os.path.join(args.build, "forbid-ruler-ids.txt"))
@@ -2068,7 +2075,7 @@ def forbid_doc(set_name, rows, made_from):
 
 
 def _g3_forbid(args):
-    root = args.old_root or os.path.join(os.path.expanduser("~"), ".judgemodel")
+    root = os.path.expanduser(args.old_root) if args.old_root else os.path.join(os.path.expanduser("~"), ".judgemodel")
     g2_build = args.g2_build or os.path.join(root, "build", "g2")
     return G3Forbid(root, args.g1_build or os.path.join(root, "build", "g1"),
                     args.use1 or os.path.join(root, "measure", "use1"),
@@ -2104,6 +2111,514 @@ def reserve_g3_main(args):
                       "pending": doc["pending"], "train": doc["train"], "overlap": doc["overlap"],
                       "check": doc["check"]}, ensure_ascii=False, indent=1))
     return 1 if sum(doc["check"].values()) else 0
+
+
+# ---------------------------------------------------------------- reserve-g4 (v1.2 K2 판 평가 몫 예약, 설계 v1.2-K2-한국어c보강판 3-1 · 3-3 · 3-4 · 5절 ①②)
+#
+# blind-g4 를 먼저 채운다 : 한국어 b 묶음(위키 → KLUE → BoolQ, 모자란 b 는 BoolQ 로) · VitaminC 쪽(b · a 쪽당 2) · c
+# (VitaminC 같은 쪽 · 예약 줄끼리 near-x). 그다음 dev-cmp-g4 새 c 를 blind 가 안 쓴 평가 몫 묶음끼리 near-x 로 만든다.
+# g3 때 git 밖 add_g3_ac.py 로 따로 더한 a · c 를 이 한 명령 안에 넣었다 — 다시 돌려도 a · c 가 안 빠진다.
+
+G4_SETS = ("blind-g4", "dev-cmp-g4")
+G4_KO = ("wiki", "klue", "boolq")                # 예약 차례 = 넘김 차례
+G4_SHIFT = {"wiki": "boolq", "klue": "boolq"}    # 모자란 ko b 를 받는 원천 (설계 8절)
+G4_INPUTS = {"wiki": "kowiki/wiki-labeled-eval.jsonl", "boolq": "boolq/judged-eval.jsonl",
+             "klue": "klue/judged-eval.jsonl"}
+G4_TARGETS = {
+    # 수는 모두 「묶음 수」다 — 얼리기 전 자(min_groups)가 묶음 수라서 (리뷰 #2 · #6)
+    "b": {"wiki": 110, "boolq": 90, "klue": 50},                 # blind-g4 ko b 묶음 (문서 · 문단당 b 1 먼저)
+    # a 묶음 — b 묶음 안 a + 「a 만 있는 묶음」으로 채운다. 실물(10-14)은 ko a 가 76 묶음뿐이라 VitaminC 로 메운다 :
+    # 380 × 1.07 ≈ 407 − ko 76 → VitaminC 335 (b 쪽 290 안 a + 안 쓴 쪽 a)
+    "a": {"boolq": 90, "wiki": 45, "klue": 45, "vitaminc": 335},
+    "vit_pages": 290,                                             # VitaminC b 후보 쪽 수
+    "c": {"blind-g4": {"vitaminc-same": 75, "vitaminc": 75, "wiki": 54, "boolq": 54, "klue": 43},
+          "dev-cmp-g4": {"boolq": 54, "wiki": 43, "klue": 43}},  # c 근거 묶음 (판정 앞, 목표 × 약 1.07)
+}
+G4_GROUP_CAP = {"vitaminc": 2}                   # VitaminC 쪽당 b 2 · a 2 (g3 는 4)
+G4_PER_DOC_B = 2                                 # 한국어 문서 · 문단당 b 상한 — 1 로 다 돈 뒤 넘길 원천이 없을 때만 2
+G4_A_PER_B = 1                                   # 같은 문단 a 는 b 수만큼
+G4_MIN_GROUPS = {"b@en": 200, "a": 380, "c": 260, "b@ko": 220}   # 미리보기가 모자라면 exit 1 (자동으로 늘리지 않는다)
+G4_SEED = 20261401
+G4_OUT = ("blind-g4-cands.jsonl", "dev-cmp-g4-cands.jsonl", "reserve-g4.json", "blind-g4.forbid.json")
+G3_SET_NAMES = ("dev-cmp-g3", "dev-cal-g3", "blind-g3")
+G4_REASONS_BOTH = ("text_g3", "group_g3", "src_g3", "g3_reserved", "blind_g3_forbid", "para_old", "para_g3")
+G4_REASONS_EVAL = ("g3_train", "para_g3_train")
+
+
+def _groups_of(row):
+    return {g for g in row.get("groups") or [row.get("group")] if g}
+
+
+def _marks(path, para, tag):
+    """파일 한 장의 (글 열쇠, 묶음, 출처 id, 기억 id) — 한국어 줄은 문단 색인에 tag 로 넣는다."""
+    keys, groups, srcs, ids = set(), set(), set(), set()
+    for row in read_jsonl(path):
+        keys |= _both_keys(row)
+        groups |= _groups_of(row)
+        srcs.update(row.get("src_ids") or [])
+        ids.update(_MEM_ID.findall(json.dumps(row.get("src_ids", []))))
+        if row.get("lang") == "ko":
+            para.add(row, tag)
+    return keys, groups, srcs, ids
+
+
+class G4Forbid(G3Forbid):
+    """g4 후보가 피해야 할 것 (설계 3-3) — G3Forbid 전부 + g3 셋 셋 · blind-g3.forbid.json · reserve-g3 예약 묶음
+    + 평가 몫만 train-g3-ko · reserve-g3 학습 층 후보 + 한국어 문단 겹침(g1 · g2 평가 셋 · g3 셋)."""
+
+    def __init__(self, old_root, g1_build, use1_root, ruler_ids_path, g2_build, seed_forbid_path, g3_build):
+        super().__init__(old_root, g1_build, use1_root, ruler_ids_path, g2_build, seed_forbid_path)
+        sets_dir = os.path.join(old_root, "sets", "g3")
+        self.para = ParaIndex()
+        for gen, name in _OLD_EVAL_FILES:
+            path = os.path.join(old_root, "sets", gen, name + ".jsonl")
+            if not os.path.exists(path):
+                continue
+            for row in read_jsonl(path):
+                if row.get("lang") == "ko" or row.get("domain") in ("klue-mrc", "klue"):
+                    self.para.add(row, "old")
+        self.g3_keys, self.g3_groups, self.g3_srcs = set(), set(), set()
+        for name in G3_SET_NAMES:
+            path = self._need(os.path.join(sets_dir, name + ".jsonl"))
+            if path:
+                keys, groups, srcs, ids = _marks(path, self.para, "g3_set")
+                self.g3_keys |= keys
+                self.g3_groups |= groups
+                self.g3_srcs |= srcs
+                self.eval_ids |= ids
+                self.train_ids |= ids
+        self.t_keys, self.t_groups, self.t_srcs = set(), set(), set()
+        for path in (os.path.join(sets_dir, "train-g3-ko.jsonl"),
+                     os.path.join(g3_build, "reserve", "train-layer-cands.jsonl")):
+            path = self._need(path)
+            if path:
+                keys, groups, srcs, _ = _marks(path, self.para, "g3_train")
+                self.t_keys |= keys
+                self.t_groups |= groups
+                self.t_srcs |= srcs
+        self.g3_json = {}
+        path = self._need(os.path.join(sets_dir, "blind-g3.forbid.json"))
+        if path:
+            with open(path, encoding="utf-8") as f:
+                self.g3_json = {k: set(v) for k, v in json.load(f).items() if isinstance(v, list)}
+        self.g3_reserved = set()
+        path = self._need(os.path.join(g3_build, "reserve", "reserve-g3.json"))
+        if path:
+            with open(path, encoding="utf-8") as f:
+                self.g3_reserved = set(json.load(f).get("reserved", []))
+
+    def _need(self, path):
+        if os.path.exists(path):
+            return path
+        self.missing.append(os.path.basename(path))
+        return None
+
+    def _json_hit(self, row, groups, srcs):
+        j = self.g3_json
+        key = sha_key(row)
+        flip = sha_key({"evidence": row.get("claim"), "claim": row.get("evidence")})
+        ids = set(_MEM_ID.findall(json.dumps(row.get("src_ids", []))))
+        docs, commits = self._docs_commits(row)
+        return bool(groups & j.get("groups", set()) or srcs & j.get("src_ids", set())
+                    or {key, flip} & j.get("pair_keys", set()) or ids & j.get("mem_ids", set())
+                    or docs & j.get("doc_paths", set()) or commits & j.get("commits", set())
+                    or row.get("id") in j.get("cand_ids", set()))
+
+    def reasons(self, row, role):
+        out = super().reasons(row, role)
+        groups = _groups_of(row)
+        srcs = set(row.get("src_ids") or [])
+        keys = _both_keys(row)
+        if keys & self.g3_keys:
+            out.append("text_g3")
+        if groups & self.g3_groups:
+            out.append("group_g3")
+        if srcs & self.g3_srcs:
+            out.append("src_g3")
+        if groups & self.g3_reserved:
+            out.append("g3_reserved")
+        if self._json_hit(row, groups, srcs):
+            out.append("blind_g3_forbid")
+        if role == "eval" and (keys & self.t_keys or groups & self.t_groups or srcs & self.t_srcs):
+            out.append("g3_train")
+        if row.get("lang") == "ko":
+            hits = self.para.hits(row)
+            if "old" in hits:
+                out.append("para_old")
+            if "g3_set" in hits:
+                out.append("para_g3")
+            if role == "eval" and "g3_train" in hits:
+                out.append("para_g3_train")
+        return out
+
+
+class _Owner:
+    """묶음 · 출처 id · 글 열쇠 → 가져간 셋. 한 셋이 가진 것은 다른 셋이 못 쓰고, 같은 글은 두 번 못 쓴다."""
+
+    def __init__(self):
+        self.group, self.src, self.key = {}, {}, set()
+
+    def free(self, row, set_name):
+        if {self.group[g] for g in _groups_of(row) if g in self.group} - {set_name}:
+            return False
+        if {self.src[s] for s in row.get("src_ids") or [] if s in self.src} - {set_name}:
+            return False
+        return not _both_keys(row) & self.key
+
+    def take(self, row, set_name):
+        for g in _groups_of(row):
+            self.group[g] = set_name
+        for s in row.get("src_ids") or []:
+            self.src[s] = set_name
+        self.key |= _both_keys(row)
+
+
+def _g4_good(rows, forbid, keep_row):
+    """금지에 안 걸린 줄을 묶음별로 → ({묶음: 줄}, 버린 까닭 셈)."""
+    good, dropped = collections.defaultdict(list), collections.Counter()
+    for row in rows or []:
+        if not keep_row(row):
+            continue
+        if row.get("keep") is False:
+            dropped["keep_false"] += 1
+            continue
+        why = forbid.reasons(row, "eval")
+        if why:
+            dropped.update(why)
+            continue
+        good[row["group"]].append(dict(row, groups=sorted(_groups_of(row))))
+    return good, dropped
+
+
+def _shuffled(keys, seed, name):
+    order = sorted(keys)
+    random.Random(f"{seed}:{name}").shuffle(order)
+    return order
+
+
+def _take_rows(rows, owner, set_name, out, source):
+    taken = []
+    for row in rows:
+        if not owner.free(row, set_name):
+            continue
+        owner.take(row, set_name)
+        out.append(dict(row, set=set_name, g4_source=source, g4_label=g3_label(row)))
+        taken.append(row)
+    return taken
+
+
+def _has(rows, label):
+    return any(g3_label(r) == label for r in rows)
+
+
+def _reserve_ko_b(source, good, target, owner, out, seed, second):
+    """한 원천의 b 묶음을 blind-g4 에 target 묶음까지 — 묶음당 b 1 · 같은 문단 a 는 b 수만큼.
+    second 면(넘길 원천이 없는 마지막 원천) 묶음이 모자랄 때 잡은 묶음에 b 를 하나 더 넣어 줄 수만 채운다.
+    → (b 묶음 수, b 줄 수)."""
+    got = []
+    for gid in _shuffled([g for g in good if _has(good[g], "b")], seed, source):
+        if len(got) >= target:
+            break
+        rows = sorted(good[gid], key=lambda r: r["id"])
+        b_rows = [r for r in rows if g3_label(r) == "b"][:1]
+        a_rows = [r for r in rows if g3_label(r) == "a"][:G4_A_PER_B * len(b_rows)]
+        if _has(_take_rows(b_rows + a_rows, owner, "blind-g4", out, source), "b"):
+            got.append(gid)
+    n_rows = len(got)
+    if second:
+        for gid in got:
+            if n_rows >= target:
+                break
+            extra = [r for r in sorted(good[gid], key=lambda r: r["id"]) if g3_label(r) == "b"][1:G4_PER_DOC_B]
+            n_rows += sum(1 for r in _take_rows(extra, owner, "blind-g4", out, source) if g3_label(r) == "b")
+    return len(got), n_rows
+
+
+def _a_groups(out, source):
+    return {r["group"] for r in out if r["g4_source"] == source and r["g4_label"] == "a"}
+
+
+def _reserve_a(source, good, target, owner, out, seed, per_group):
+    """a 묶음을 target 까지 — b 묶음 안 a 로 모자라면 「a 만 있는 묶음」(b 없는 묶음)에서 a 를 per_group 줄씩.
+    VitaminC 는 b 가 있어도 안 쓴 쪽이면 a 만 가져온다(b 없는 쪽 먼저). → a 묶음 수."""
+    have = _a_groups(out, source)
+    cands = [g for g in good if g not in have and _has(good[g], "a")]
+    no_b = [g for g in _shuffled(cands, seed, source + ":a") if not _has(good[g], "b")]
+    with_b = [g for g in _shuffled(cands, seed, source + ":a") if _has(good[g], "b")] if source == "vitaminc" else []
+    for gid in no_b + with_b:
+        if len(have) >= target:
+            break
+        rows = [r for r in sorted(good[gid], key=lambda r: r["id"]) if g3_label(r) == "a"
+                and (source != "vitaminc" or r.get("form") == "labeled")][:per_group]
+        if _take_rows(rows, owner, "blind-g4", out, source):
+            have.add(gid)
+    return len(have)
+
+
+def _reserve_vitaminc(good, pages, owner, out, seed):
+    """VitaminC b 가 든 쪽을 pages 개 — 쪽당 b · a 각 G4_GROUP_CAP. → 쓴 쪽 목록."""
+    cap = G4_GROUP_CAP["vitaminc"]
+    used = []
+    for gid in _shuffled([g for g in good if any(r["hint"] == "b" for r in good[g])], seed, "vitaminc"):
+        if len(used) >= pages:
+            break
+        rows = sorted(good[gid], key=lambda r: r["id"])
+        pick = []
+        for hint in ("b", "a"):
+            pick += [r for r in rows if r["hint"] == hint and r.get("form") == "labeled"][:cap]
+        if _take_rows(pick, owner, "blind-g4", out, "vitaminc"):
+            used.append(gid)
+    return used
+
+
+def _add_near(set_name, source, rows, n_groups, owner, out, forbid, seed, prefix, c_groups):
+    """예약 줄끼리 near-x c 를 근거 묶음 n_groups 개 — c 를 이미 가진 묶음(c_groups, 같은 쪽 c 와 같이 쓴다)은 근거로
+    안 쓰고, 한 묶음에 c 하나. 금지 · 겹침을 한 번 더 본다. → 넣은 묶음 수."""
+    evs = [r for r in rows if r["group"] not in c_groups]
+    if n_groups <= 0 or not evs:
+        return 0
+    made = near_c(evs, len(evs), random.Random(f"{seed}:{set_name}:{source}:near"), collections.Counter(), prefix,
+                  claim_rows=rows, split="eval", origin="g4-eval", hash_id=True)
+    got = 0
+    for row in made:
+        if got >= n_groups:
+            break
+        if row["group"] in c_groups or forbid.reasons(row, "eval"):
+            continue
+        if _take_rows([row], owner, set_name, out, source):
+            c_groups.add(row["group"])
+            got += 1
+    return got
+
+
+def _same_page_c(good, pages, n_groups, owner, out, seed, c_groups):
+    """VitaminC 같은 쪽 c — b 쪽마다 c 하나씩 n_groups 쪽. → 넣은 묶음 수."""
+    got = 0
+    for gid in _shuffled(pages, seed, "vitaminc:same"):
+        if got >= n_groups:
+            break
+        rows = [r for r in sorted(good[gid], key=lambda r: r["id"]) if r["hint"] == "c"]
+        for row in rows:
+            if _take_rows([row], owner, "blind-g4", out, "vitaminc"):
+                c_groups.add(gid)
+                got += 1
+                break
+    return got
+
+
+def reserve_g4(build, forbid, vitc_path, seed=G4_SEED, targets=None):
+    """blind-g4 를 먼저 채우고 dev-cmp-g4 새 c 를 남은 묶음에서 → (예약 문서, 셋별 줄).
+    차례 : ko b(위키 → KLUE → BoolQ, 모자란 묶음은 BoolQ 로) → VitaminC b 쪽 → a(원천별 묶음 목표, ko 는 b 묶음 안 a 다음
+    a 만 있는 묶음) → c(같은 쪽 c 와 near-x 가 근거 묶음을 같이 센다) → dev-cmp-g4 c. 목표는 모두 묶음 수다."""
+    targets = dict(G4_TARGETS, **(targets or {}))
+    paths = {s: os.path.join(build, rel) for s, rel in G4_INPUTS.items()}
+    loaded = {s: read_jsonl(p) if os.path.exists(p) else None for s, p in paths.items()}
+    vit = read_jsonl(vitc_path) if os.path.exists(vitc_path) else None
+    doc = {"seed": seed, "targets": targets, "group_cap": G4_GROUP_CAP, "per_doc_b": G4_PER_DOC_B,
+           "a_per_b": G4_A_PER_B, "inputs": {s: {"path": G4_INPUTS[s], "rows": None if r is None else len(r)}
+                                            for s, r in loaded.items()},
+           "sets": {s: {} for s in G4_SETS}, "shift": {}, "pending": {}, "dropped_eval": {},
+           "missing": list(forbid.missing)}
+    doc["inputs"]["vitaminc"] = {"path": os.path.basename(vitc_path), "rows": None if vit is None else len(vit)}
+    if vit is None:
+        doc["missing"].append(os.path.basename(vitc_path))
+    owner = _Owner()
+    out = {s: [] for s in G4_SETS}
+    good = {}
+    for source in G4_KO:
+        good[source], doc["dropped_eval"][source] = _g4_good(loaded[source], forbid, lambda r: True)
+    vit_kinds = {("b", "labeled"), ("a", "labeled"), ("c", "same-page")}
+    good["vitaminc"], doc["dropped_eval"]["vitaminc"] = _g4_good(
+        vit, forbid, lambda r: r.get("split") == "heldout" and (r.get("hint"), r.get("form")) in vit_kinds)
+    blind = doc["sets"]["blind-g4"]
+    for kind in ("b", "a"):
+        shift = collections.Counter()
+        for source in G4_KO:
+            target = targets[kind].get(source, 0) + shift[source]
+            if loaded[source] is None:
+                doc["pending"][f"{kind}:{source}"] = target   # 판정 파일이 아직 없는 원천은 넘기지 않고 기다린다
+                continue
+            entry = blind.setdefault(source, {})
+            if kind == "b":
+                groups, n_rows = _reserve_ko_b(source, good[source], target, owner, out["blind-g4"], seed,
+                                               second=source not in G4_SHIFT)
+                entry.update(b_target=target, b_groups=groups, b_rows=n_rows)
+            else:
+                groups = _reserve_a(source, good[source], target, owner, out["blind-g4"], seed, 1)
+                entry.update(a_target=target, a_groups=groups)
+            short = max(0, target - groups)
+            entry[f"{kind}_short"] = short
+            if short and source in G4_SHIFT:
+                shift[G4_SHIFT[source]] += short
+                doc["shift"][f"{kind}:{source}->{G4_SHIFT[source]}"] = short
+        if kind == "b":
+            pages = _reserve_vitaminc(good["vitaminc"], targets["vit_pages"], owner, out["blind-g4"], seed)
+    vit_a = targets["a"].get("vitaminc", 0)
+    got = _reserve_a("vitaminc", good["vitaminc"], vit_a, owner, out["blind-g4"], seed, G4_GROUP_CAP["vitaminc"])
+    blind.setdefault("vitaminc", {}).update(a_target=vit_a, a_groups=got, a_short=max(0, vit_a - got))
+    c_want = targets["c"]["blind-g4"]
+    c_groups = set()
+    got = _same_page_c(good["vitaminc"], pages, c_want.get("vitaminc-same", 0), owner, out["blind-g4"], seed,
+                       c_groups)
+    blind["vitaminc"].update(c_same_target=c_want.get("vitaminc-same", 0), c_same_groups=got)
+    for source in ("vitaminc",) + G4_KO:
+        rows = [r for r in out["blind-g4"] if r["g4_source"] == source and r["g4_label"] != "c"]
+        got = _add_near("blind-g4", source, rows, c_want.get(source, 0), owner, out["blind-g4"], forbid, seed,
+                        f"bg4x-{source}-", c_groups)
+        blind.setdefault(source, {}).update(c_target=c_want.get(source, 0), c_groups=got)
+    dev_c = set()
+    for source in ("boolq", "wiki", "klue"):
+        rest = [r for g in sorted(good[source]) for r in good[source][g] if owner.free(r, "dev-cmp-g4")]
+        want = targets["c"]["dev-cmp-g4"].get(source, 0)
+        got = _add_near("dev-cmp-g4", source, rest, want, owner, out["dev-cmp-g4"], forbid, seed, f"dc4x-{source}-",
+                        dev_c)
+        doc["sets"]["dev-cmp-g4"].setdefault(source, {}).update(c_target=want, c_groups=got)
+    for set_name, rows in out.items():
+        for source in sorted({r["g4_source"] for r in rows}):
+            got = [r for r in rows if r["g4_source"] == source]
+            entry = doc["sets"][set_name].setdefault(source, {})
+            entry.update(rows=len(got), groups=len({r["group"] for r in got}),
+                         labels=dict(sorted(collections.Counter(r["g4_label"] for r in got).items())),
+                         row_ids=[r["id"] for r in got])
+    doc["vit_pages"] = len(pages)
+    preview = {k: len(v) for k, v in _cand_groups(out["blind-g4"]).items()}
+    doc["min_groups_preview"] = {k: [n, G4_MIN_GROUPS[k]] for k, n in preview.items()}
+    doc["short"] = {k: G4_MIN_GROUPS[k] - n for k, n in preview.items() if n < G4_MIN_GROUPS[k]}
+    doc["reserved"] = sorted(owner.group)
+    for source, dropped in doc["dropped_eval"].items():
+        doc["dropped_eval"][source] = dict(sorted(dropped.items()))
+    return doc, out
+
+
+def _cand_groups(rows):
+    """판정 앞 후보 칸(hint)으로 센 묶음 — min_groups 자 이름으로."""
+    out = {k: set() for k in G4_MIN_GROUPS}
+    for r in rows:
+        label = r["g4_label"]
+        for name in (label, f"{label}@{r.get('lang')}"):
+            if name in out:
+                out[name].add(r["group"])
+    return out
+
+
+def check_g4(eval_rows, train_rows, forbid):
+    """g4 셋 사이 · 평가 × 학습 층 · 둘 × 금지 목록(G4Forbid) 겹침 수. 0 이어야 한다."""
+    counts = collections.Counter()
+    seen_group, seen_key, seen_src = {}, {}, {}
+    para = ParaIndex()
+    for set_name, rows in eval_rows.items():
+        for row in rows:
+            for gid in _groups_of(row):
+                if seen_group.setdefault(gid, set_name) != set_name:
+                    counts["eval_group_across_sets"] += 1
+            for key in _both_keys(row):
+                if seen_key.setdefault(key, set_name) != set_name:
+                    counts["eval_text_across_sets"] += 1
+            for src in row.get("src_ids", []):
+                if seen_src.setdefault(src, set_name) != set_name:
+                    counts["eval_src_across_sets"] += 1
+            if row.get("lang") == "ko":
+                if para.hits(row) - {set_name}:
+                    counts["eval_para_across_sets"] += 1
+                para.add(row, set_name)
+            for why in forbid.reasons(row, "eval"):
+                counts["eval_" + why] += 1
+    for row in train_rows:
+        if _groups_of(row) & set(seen_group):
+            counts["train_group_eval"] += 1
+        if _both_keys(row) & set(seen_key):
+            counts["train_text_eval"] += 1
+        if set(row.get("src_ids", [])) & set(seen_src):
+            counts["train_src_eval"] += 1
+        if row.get("lang") == "ko" and para.hits(row):
+            counts["train_para_eval"] += 1
+        for why in forbid.reasons(row, "train"):
+            counts["train_" + why] += 1
+    names = ["eval_group_across_sets", "eval_text_across_sets", "eval_src_across_sets", "eval_para_across_sets",
+             "train_group_eval", "train_text_eval", "train_src_eval", "train_para_eval"]
+    old = ("text_old", "mem_id_old", "ruler_mem", "group_g1", "use1_pair", "use1_text", "blind_g2_forbid")
+    names += [f"eval_{w}" for w in old + ("side_old", "seed_g3", "g2_reserved", "page_in_train")
+              + G4_REASONS_BOTH + G4_REASONS_EVAL]
+    names += [f"train_{w}" for w in old + G4_REASONS_BOTH]
+    return {k: counts.get(k, 0) for k in names}
+
+
+def _g4_forbid(args):
+    root = os.path.expanduser(args.old_root) if args.old_root else os.path.join(os.path.expanduser("~"), ".judgemodel")
+    g2_build = args.g2_build or os.path.join(root, "build", "g2")
+    g3_build = args.g3_build or os.path.join(root, "build", "g3")
+    return G4Forbid(root, args.g1_build or os.path.join(root, "build", "g1"),
+                    args.use1 or os.path.join(root, "measure", "use1"),
+                    args.ruler_ids or os.path.join(g2_build, "forbid-ruler-ids.txt"), g2_build,
+                    args.seed_forbid or os.path.join(g3_build, "seed", "forbid-g3.txt"), g3_build), root
+
+
+def _date_tail(path, stamp):
+    base, ext = os.path.splitext(path)
+    return f"{base}.{stamp}{ext}"
+
+
+def _inside_git(path):
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from label_batches import inside_git   # build/ 안 모듈 — make_sets 는 맨 위에서 안 부른다
+    return inside_git(path)
+
+
+def reserve_g4_main(args):
+    """exit : 0 = 다 됨 · 1 = 겹침 · 대기 원천 · 묶음 미리보기 모자람(알림 칸) · 2 = 멈춤(출력 있음 · git 안 · 파일 빠짐)."""
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")   # 알림 글이 cp949 콘솔 · 파이프에서 깨지지 않게
+    build = os.path.expanduser(args.build)
+    out = os.path.join(build, "reserve")
+    if _inside_git(out):
+        print(json.dumps({"stop": "출력 폴더가 git 안이다 — 쌍 본문을 git 안에 안 쓴다", "out": out}, ensure_ascii=False))
+        return 2
+    clash = [n for n in G4_OUT if os.path.exists(os.path.join(out, n))]
+    if clash and not args.force:
+        print(json.dumps({"stop": "출력이 이미 있다 — 덮지 않는다 (--force 면 옛 파일을 날짜 꼬리로 돌려 둔다)",
+                          "files": clash}, ensure_ascii=False))
+        return 2
+    forbid, root = _g4_forbid(args)
+    vitc = os.path.expanduser(args.vitaminc) if args.vitaminc else os.path.join(root, "build", "g1", "vitaminc",
+                                                                                 "candidates.jsonl")
+    missing = list(forbid.missing) + ([] if os.path.exists(vitc) else [os.path.basename(vitc)])
+    if missing:
+        print(json.dumps({"missing": missing}, ensure_ascii=False))
+        return 2
+    targets = None
+    if args.targets:
+        with open(os.path.expanduser(args.targets), encoding="utf-8") as f:
+            targets = json.load(f)
+    doc, eval_rows = reserve_g4(build, forbid, vitc, args.seed, targets)
+    doc["check"] = check_g4(eval_rows, [], forbid)
+    notice = []
+    if doc["pending"]:
+        notice.append("판정 파일이 없는 원천이 있다 — pending 몫은 비었다")
+    if doc["short"]:
+        notice.append("blind-g4 묶음 미리보기가 min_groups 아래다 — 목표를 늘려 다시 돌린다 (자동으로 안 늘린다)")
+    doc["notice"] = notice
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    moved = {}
+    for name in clash:
+        moved[name] = os.path.basename(_date_tail(os.path.join(out, name), stamp))
+        os.replace(os.path.join(out, name), _date_tail(os.path.join(out, name), stamp))
+    doc["moved_old"] = moved
+    os.makedirs(out, exist_ok=True)
+    for set_name, rows in eval_rows.items():
+        _write_jsonl(os.path.join(out, f"{set_name}-cands.jsonl"), rows)
+    with open(os.path.join(out, "blind-g4.forbid.json"), "w", encoding="utf-8", newline="\n") as f:
+        json.dump(forbid_doc("blind-g4", eval_rows["blind-g4"], ["build/g4/reserve/blind-g4-cands.jsonl"]), f,
+                  ensure_ascii=False, indent=1)
+    with open(os.path.join(out, "reserve-g4.json"), "w", encoding="utf-8", newline="\n") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=1)
+    brief = {s: {src: {k: v for k, v in e.items() if k != "row_ids"} for src, e in per.items()}
+             for s, per in doc["sets"].items()}
+    print(json.dumps({"sets": brief, "shift": doc["shift"], "pending": doc["pending"], "vit_pages": doc["vit_pages"],
+                      "min_groups_preview": doc["min_groups_preview"], "short": doc["short"], "notice": notice,
+                      "moved_old": moved, "check": doc["check"]}, ensure_ascii=False, indent=1))
+    return 1 if sum(doc["check"].values()) or notice else 0
 
 
 def main(argv=None):
@@ -2175,6 +2690,19 @@ def main(argv=None):
     g3.add_argument("--use1", help="use1 뿌리 (기본 <old-root>/measure/use1)")
     g3.add_argument("--ruler-ids", help="잣대 기억 id 목록 (기본 <g2-build>/forbid-ruler-ids.txt)")
     g3.add_argument("--seed-forbid", help="씨앗 금지 목록 (기본 <build>/seed/forbid-g3.txt)")
+    g4 = sub.add_parser("reserve-g4", help="v1.2 K2 판 — blind-g4 · dev-cmp-g4 새 c 예약 · blind-g4.forbid.json")
+    g4.add_argument("--build", required=True, help="g4 뿌리 (kowiki · boolq · klue 아래 판정 파일, reserve/ 가 생김)")
+    g4.add_argument("--seed", type=int, default=G4_SEED)
+    g4.add_argument("--targets", help="목표 json ({b: {원천: 수}, vit_pages, c: {셋: {원천: 수}}}, 기본 설계 3-1 표)")
+    g4.add_argument("--vitaminc", help="VitaminC 후보 (heldout 줄만 씀, 기본 <old-root>/build/g1/vitaminc/candidates.jsonl)")
+    g4.add_argument("--old-root", help="옛 셋 뿌리 (기본 ~/.judgemodel)")
+    g4.add_argument("--g1-build", help="g1 후보 뿌리 (기본 <old-root>/build/g1)")
+    g4.add_argument("--g2-build", help="g2 후보 뿌리 (기본 <old-root>/build/g2)")
+    g4.add_argument("--g3-build", help="g3 뿌리 (reserve/reserve-g3.json · train-layer-cands, 기본 <old-root>/build/g3)")
+    g4.add_argument("--use1", help="use1 뿌리 (기본 <old-root>/measure/use1)")
+    g4.add_argument("--ruler-ids", help="잣대 기억 id 목록 (기본 <g2-build>/forbid-ruler-ids.txt)")
+    g4.add_argument("--seed-forbid", help="씨앗 금지 목록 (기본 <g3-build>/seed/forbid-g3.txt)")
+    g4.add_argument("--force", action="store_true", help="출력이 있으면 옛 파일을 <이름>.<날짜>.<확장자> 로 돌려 두고 쓴다")
     at = sub.add_parser("attach-rewrite", help="학습 후보 KLUE 줄에 Opus 평서문 claim 붙이기 → klue 줄만")
     at.add_argument("--cands", required=True, help="학습 후보 (train-cands.jsonl)")
     at.add_argument("--rewrite", nargs="+", required=True, help="rewrite-train-*.jsonl (cand_idx · group · src_ids · claim)")
@@ -2186,6 +2714,8 @@ def main(argv=None):
         return check_g2_main(args)
     if args.cmd == "reserve-g3":
         return reserve_g3_main(args)
+    if args.cmd == "reserve-g4":
+        return reserve_g4_main(args)
     if args.cmd == "attach-rewrite":
         return attach_rewrite_main(args)
     if args.cmd == "eval-pool" and args.archive:

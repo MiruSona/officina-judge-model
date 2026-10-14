@@ -251,6 +251,23 @@ def gate_slice_specs(protocol):
     return list(specs.values())
 
 
+def group_counts(min_groups, set_rows, ids, gold, group_key):
+    """min_groups 자 이름(칸 글자 · 꼬리 @lang) → 그 정답 칸 쌍의 묶음 수. 묶음 칸이 빈 쌍은 쌍 id 를 묶음으로 친다."""
+    out = {}
+    for name in min_groups:
+        letter, _, lang = name.partition("@")
+        if letter not in LETTERS or len(letter) != 1:
+            raise Refuse(f"min_groups 자 이름은 a~d 글자(꼬리 @lang)여야 한다: {name}")
+        groups = set()
+        for pid, g in zip(ids, gold):
+            row = set_rows.get(pid, {})
+            if g != LETTERS.index(letter) or (lang and str(row.get("lang")) != lang):
+                continue
+            groups.add(str(row.get(group_key) or pid))
+        out[name] = len(groups)
+    return out
+
+
 def rate(table, metric):
     mask, hits = hit_counts(table, metric)
     n = sum(mask)
@@ -410,11 +427,11 @@ def check_hashes(protocol, protocol_sha, set_sha, conditions):
                 raise Refuse(f"[{name}] {run['path']} 의 calibration 이 잴 셋으로 골랐다 — 문턱은 dev-cal 로만")
 
 
-BY_METRICS = ("d_recall", "b_recall", "acc3")
+BY_METRICS = ("d_recall", "b_recall", "acc3", "a_recall", "c_recall")
 
 
 def by_table(set_rows, ids, base, new, keys):
-    """--by 표 — 칸 조합마다 d · b 재현 · 3칸 정확도 (base · new · 차). 점 추정만, 구간 없음."""
+    """--by 표 — 칸 조합마다 d · b · a · c 재현 · 3칸 정확도 (base · new · 차). 점 추정만, 구간 없음."""
     buckets = {}
     for pos, pid in enumerate(ids):
         row = set_rows.get(pid, {})
@@ -426,7 +443,8 @@ def by_table(set_rows, ids, base, new, keys):
         b = {"gold": [base["gold"][i] for i in sub], "counts": [base["counts"][i] for i in sub], "seeds": base["seeds"]}
         n = {"gold": [new["gold"][i] for i in sub], "counts": [new["counts"][i] for i in sub], "seeds": new["seeds"]}
         line = {"key": key, "pairs": len(sub), "d_pairs": sum(1 for g in b["gold"] if g == RELATED),
-                "b_pairs": sum(1 for g in b["gold"] if g == CONTRA)}
+                "b_pairs": sum(1 for g in b["gold"] if g == CONTRA),
+                "a_pairs": sum(1 for g in b["gold"] if g == SUPPORT), "c_pairs": sum(1 for g in b["gold"] if g == UNRELATED)}
         for metric in BY_METRICS:
             rb, rn = rate(b, metric), rate(n, metric)
             line[metric] = {"base": rb, "new": rn, "diff": None if rb is None or rn is None else round(rn - rb, 4)}
@@ -552,13 +570,22 @@ def to_markdown(result):
         if not rows:
             continue
         lines += ["", f"| {title} | 쌍 | d 쌍 | d 재현 base → new (차) | b 쌍 | b 재현 base → new (차) "
-                      "| 3칸 base → new (차) |", "| --- | --- | --- | --- | --- | --- | --- |"]
+                      "| 3칸 base → new (차) | a 쌍 | a 재현 base → new (차) | c 쌍 | c 재현 base → new (차) |",
+                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
         for r in rows:
             d, b, a = r["d_recall"], r["b_recall"], r["acc3"]
             lines.append(f"| {r['key']} | {r['pairs']} | {r['d_pairs']} | {fmt(d['base'])} → {fmt(d['new'])} ({fmt(d['diff'])}) "
                          f"| {r['b_pairs']} | {fmt(b['base'])} → {fmt(b['new'])} ({fmt(b['diff'])}) "
-                         f"| {fmt(a['base'])} → {fmt(a['new'])} ({fmt(a['diff'])}) |")
+                         f"| {fmt(a['base'])} → {fmt(a['new'])} ({fmt(a['diff'])}) "
+                         f"| {r.get('a_pairs', '—')} | {span(r.get('a_recall'))} | {r.get('c_pairs', '—')} | {span(r.get('c_recall'))} |")
     return "\n".join(lines) + "\n"
+
+
+def span(cell):
+    """by 표 칸 하나 「base → new (차)」. 옛 결과 파일처럼 칸이 없으면 —."""
+    if not cell:
+        return "—"
+    return f"{fmt(cell['base'])} → {fmt(cell['new'])} ({fmt(cell['diff'])})"
 
 
 def fmt(value):

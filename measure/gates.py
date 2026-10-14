@@ -49,9 +49,11 @@ def release_gate(protocol, set_rows, run, calibration, ref_run=None, p95_ms=None
 
     규약에 있는 칸만 잰다 — g1 은 절대 자(acc3_min · unsure_max · d_*), g2 는 vs_ref 목록 · unsure_vs_ref_max_diff.
     g3 는 b_recall_min · vs_ref 항목에 거름 칸(lang · domain)을 달 수 있다 — 자 이름 b_recall@ko · vs_ref_b_recall@ko.
+    g4 는 min_groups 가 모자라면 자를 재기 전에 거부한다.
     """
     gate = protocol["release_gate"]
     table = cmp.pair_hits([run], list(set_rows))
+    check_min_groups(gate, set_rows, table, protocol.get("group_key", "group"))
     th = calibration["thresholds"]
     scored = scored_rows(run, table["ids"], calibration)
     non_support = sum(1 for _, label in scored if label != cmp.SUPPORT)
@@ -75,6 +77,15 @@ def release_gate(protocol, set_rows, run, calibration, ref_run=None, p95_ms=None
     rows.extend(vs_ref_rows(protocol, set_rows, table, ref_run))
     return [{"ruler": r[0], "value": round(r[1], 4) if isinstance(r[1], float) else r[1], "need": r[2], "ok": r[3]}
             for r in rows]
+
+
+def check_min_groups(gate, set_rows, table, group_key):
+    """min_groups 칸(g4 부터)이 있으면 칸별 묶음 수가 모자란 셋은 거부한다 — 자가 잴 힘이 없다. 칸이 없으면 그냥 지나간다."""
+    want = gate.get("min_groups") or {}
+    have = cmp.group_counts(want, set_rows, table["ids"], table["gold"], group_key)
+    short = {name: f"{have[name]} < {need}" for name, need in want.items() if have[name] < need}
+    if short:
+        raise Refuse(f"잴 셋의 묶음 수가 규약 min_groups 에 모자란다 {short}")
 
 
 def scored_rows(run, ids, calibration):

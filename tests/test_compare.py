@@ -260,6 +260,31 @@ class VerdictTest(unittest.TestCase):
         self.assertAlmostEqual(got["mem · ko"], 10 / 12)
         self.assertAlmostEqual(got["jira · en"], (10 / 3 + 2) / 8)
 
+    def test_by_table_has_a_c_old_values_same(self):
+        # K2 설계 ⑧ : --by 표에 a · c 재현 칸이 붙고, 옛 d · b · 3칸 값은 rate 로 따로 센 값과 같다
+        _, base = cmp.load_runs(self.fx.runs("B0", base_pred))
+        _, new = cmp.load_runs(self.fx.runs("B1", new_pred))
+        ids = [r["id"] for r in self.fx.set_rows]
+        set_rows = cmp.read_set(self.fx.set_path)
+        rows = cmp.by_table(set_rows, ids, cmp.pair_hits(base, ids), cmp.pair_hits(new, ids), ["domain", "lang"])
+        by = {r["key"]: r for r in rows}
+        self.assertAlmostEqual(by["mem · ko"]["d_recall"]["new"], 10 / 12)
+        new_table = cmp.pair_hits(new, ids)
+        for key, line in by.items():
+            pos = [i for i, pid in enumerate(ids) if f"{set_rows[pid]['domain']} · {set_rows[pid]['lang']}" == key]
+            sub = cmp.sub_table(new_table, pos)
+            for metric in ("d_recall", "b_recall", "acc3", "a_recall", "c_recall"):
+                self.assertEqual(line[metric]["new"], cmp.rate(sub, metric), (key, metric))
+            self.assertEqual(line["c_pairs"], sum(1 for g in sub["gold"] if g == cmp.UNRELATED))
+            self.assertEqual(line["a_pairs"], sum(1 for g in sub["gold"] if g == cmp.SUPPORT))
+        protocol, stats = self.fx.stats(base_pred, new_pred)
+        stats.pop("_tables")
+        result = {"base": "B0", "new": "B1", "protocol_sha256": "0" * 64, "set_sha256": "0" * 64,
+                  "stats": stats, "verdict": cmp.verdict(protocol, stats), "by": rows}
+        md = cmp.to_markdown(result)
+        self.assertIn("c 재현", md)
+        self.assertIn("a 재현", md)
+
     def test_release_pick_closest_to_mean(self):
         # 새 판 씨앗별 d 재현 0.9 · 0.7 · 0.7 (평균 0.7667) → 가장 가까운 씨앗 2
         _, stats = self.fx.stats(base_pred, new_pred)
@@ -490,6 +515,70 @@ class G3SliceTest(unittest.TestCase):
         md = cmp.to_markdown(result)
         self.assertIn("| 목표 b_recall@ko | O |", md)
         self.assertIn("| b_recall@mem·ko |", md)
+
+
+PROTOCOL_G4_FROZEN = os.path.join(helpers.ROOT, "measure", "protocol-g4.json")
+PROTOCOL_G5 = os.path.join(helpers.ROOT, "measure", "protocol-g5.draft.json")
+
+
+def ko_c_miss_pred(row, seed):
+    """ko(g1~g3) 의 c 를 다 a 로 놓친다. 나머지는 다 맞힘."""
+    if row["label"] == "c" and row["lang"] == "ko":
+        return "a"
+    return row["label"]
+
+
+def en_d_broken_pred(row, seed):
+    """en(g4·g5) 의 d 를 다 c 로 쓸어 간다. 나머지는 다 맞힘."""
+    if row["label"] == "d" and row["lang"] == "en":
+        return "c"
+    return row["label"]
+
+
+class G5AlarmTest(unittest.TestCase):
+    """protocol-g5 초안 — 양수 경보(c_recall@ko 평균 차 ≥ +.06)와 d_recall@en 경보 (K3 설계 2-2 · 5절 ⑤)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.fx = Fixture(self._tmp.name, PROTOCOL_G5)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_draft_same_as_g4_but_named_rows(self):
+        g5, _ = cmp.read_protocol(PROTOCOL_G5)
+        g4, _ = cmp.read_protocol(PROTOCOL_G4_FROZEN)
+        for key in ("sets", "compare_on", "calibrate_on", "release_pick", "bootstrap", "seeds", "majority", "release_gate"):
+            self.assertEqual(g5[key], g4[key], key)
+        for key in ("target", "guards"):
+            self.assertEqual(g5["pair_gate"][key], g4["pair_gate"][key], key)
+        self.assertEqual((g5["name"], g5["pair_gate"]["base"], g5["pair_gate"]["new"]), ("protocol-g5", "K", "K3"))
+        self.assertEqual(g5["pair_gate"]["alarms"][:4], g4["pair_gate"]["alarms"])
+        self.assertEqual(len(g5["pair_gate"]["alarms"]), 6)
+        self.assertEqual(g5["train_sets"], dict(g4["train_sets"], **{"train-g4-d": ""}))
+        with open(PROTOCOL_G5, encoding="utf-8") as f:
+            self.assertNotIn("TODO", f.read())
+        self.assertEqual(g5["pair_gate"]["report_only"][:len(g4["pair_gate"]["report_only"])], g4["pair_gate"]["report_only"])
+        self.assertEqual(len(g5["pair_gate"]["report_only"]), len(g4["pair_gate"]["report_only"]) + 4)
+        self.assertIn("K2 → K3", " ".join(g5["pair_gate"]["report_only"]))
+        self.assertTrue(g5["pair_gate"]["verdicts"]["지킴 깨짐"].startswith("지킴 하나라도 미달 → 접는다"))
+        self.assertNotIn("K2-h", g5["pair_gate"]["verdicts"]["지킴 깨짐"])
+
+    def test_small_c_gain_fires_positive_alarm(self):
+        # c 는 그대로(차 0) → 경보 c_recall@ko 평균 차 +0.0000 < 0.06 · en d 는 나아져 en d 경보 없음
+        protocol, stats = self.fx.stats(base_pred, new_pred)
+        alarms = cmp.verdict(protocol, stats)["alarms"]
+        self.assertIn("c_recall@ko 평균 차 +0.0000 < 0.06", alarms)
+        self.assertFalse([a for a in alarms if a.startswith("d_recall@en")])
+
+    def test_big_c_gain_no_alarm_but_en_d_alarm(self):
+        # ko c 0 → 1 (차 +1, 경보 없음) · en d 1 → 0 (차 −1 < −.05 → 경보)
+        protocol, stats = self.fx.stats(ko_c_miss_pred, en_d_broken_pred)
+        self.assertEqual(stats["metrics"]["c_recall@ko"]["diff"], 1.0)
+        self.assertEqual(stats["metrics"]["d_recall@en"]["diff"], -1.0)
+        alarms = cmp.verdict(protocol, stats)["alarms"]
+        self.assertFalse([a for a in alarms if a.startswith("c_recall@ko")])
+        self.assertIn("d_recall@en 평균 차 -1.0000 < -0.05", alarms)
 
 
 class OldFormCompatTest(unittest.TestCase):

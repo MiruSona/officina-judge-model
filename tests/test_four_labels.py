@@ -36,6 +36,8 @@ def protocol_gate():
 
 CRIT4 = prereg.criteria_from_gate(protocol_gate())
 PROTOCOL_G2 = os.path.join(os.path.dirname(prereg.DEFAULT_PROTOCOL), "protocol-g2.json")
+PROTOCOL_G4 = os.path.join(os.path.dirname(prereg.DEFAULT_PROTOCOL), "protocol-g4.draft.json")
+PROTOCOL_G5 = os.path.join(os.path.dirname(prereg.DEFAULT_PROTOCOL), "protocol-g5.draft.json")
 
 
 def protocol_gate_g2():
@@ -476,6 +478,32 @@ class PreregFourTest(unittest.TestCase):
                            "/x/protocol-g3.json", "e" * 64)
         self.assertEqual(got["next"], prereg.NEXT_G3)
         self.assertNotEqual(got["next"], prereg.NEXT_G2)
+
+    def test_g4_protocol_next_is_k2_round(self):
+        # K2 설계 ⑨ : protocol-g4 박제는 K2 문구 — K 판(g3) · B 판(g2) 문구를 박지 않는다
+        with open(PROTOCOL_G4, encoding="utf-8") as f:
+            gate = json.load(f)["release_gate"]
+        got = prereg.build(self.four_spec(), {}, set(), set(), {"release_gate": gate}, "/x/protocol-g4.json", "e" * 64)
+        self.assertEqual(got["next"], prereg.NEXT_G4)
+        self.assertEqual(got["next"]["pass"], "gates.py release 통과 — 8092 교체는 사용자가 정한다")
+        self.assertEqual(got["next"]["p95_only"], "int8 → 그래도 넘으면 K2 는 내지 않고 8092 는 v1.1.0 유지")
+        self.assertEqual(got["next"]["fail"], "출시 관문 미달 — K2 는 내지 않고 8092 는 v1.1.0 유지 · blind-g4 는 쓴 셋")
+        self.assertEqual(got["release_gate"]["min_groups"], gate["min_groups"])
+        mine = {"fail": "따로"}
+        got = prereg.build(self.four_spec(), {}, set(), set(), {"release_gate": gate}, "/x/protocol-g4.json", "e" * 64,
+                           mine)
+        self.assertEqual(got["next"], mine)
+
+    def test_g5_protocol_next_is_k3_round(self):
+        # K3 설계 5절 ④ : protocol-g5 박제는 K3 문구 — K2(g4) 문구를 박지 않는다
+        with open(PROTOCOL_G5, encoding="utf-8") as f:
+            gate = json.load(f)["release_gate"]
+        got = prereg.build(self.four_spec(), {}, set(), set(), {"release_gate": gate}, "/x/protocol-g5.json", "e" * 64)
+        self.assertEqual(got["next"], prereg.NEXT_G5)
+        self.assertNotEqual(got["next"], prereg.NEXT_G4)
+        self.assertEqual(got["next"]["p95_only"], "int8 → 그래도 넘으면 K3 는 내지 않고 8092 는 v1.1.0 유지")
+        self.assertEqual(got["next"]["fail"], "출시 관문 미달 — K3 는 내지 않고 8092 는 v1.1.0 유지 · blind-g4 는 쓴 셋")
+        self.assertEqual(got["release_gate"], gate)
 
     def test_unknown_vs_ref_protocol_needs_next(self):
         gate = {"release_gate": protocol_gate_g2()}

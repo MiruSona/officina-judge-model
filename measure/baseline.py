@@ -8,7 +8,7 @@
   ② 자가 3%p 를 가리나 — 씨앗 짝(1v1) 붓스트랩 반폭과, 그걸 씨앗 평균으로 줄인 어림(÷√씨앗 수), 수준 반폭(보수)
   ③ 같은 씨앗 재실행 차 — 3칸 차가 씨앗 사이 폭의 절반을 넘으면 결정 모드를 따진다 (설계 2-3)
   ④ 곁 자 — 판 옆 eval-side.txt
-  ⑤ 언어별 b 재현 — 셋 줄에 lang 칸이 있으면 ko · en 마다 씨앗별 값 · 씨앗 평균 [95%] · 짝 반폭 어림.
+  ⑤ 언어별 b · c 재현 — 셋 줄에 lang 칸이 있으면 ko · en 마다 씨앗별 값 · 씨앗 평균 [95%] · 짝 반폭 어림 (c 는 g4 판별 문턱).
      ko · en 밖 언어(mix 등)는 빠지고, 빠진 언어와 쌍 수를 요약(lang_b_skipped)에 적는다
 릴리스 pick 은 규약 release_pick 을 통째로 compare.pick_release 에 넘긴다 — lang 거름(g3 의 ko b)도 compare 와 같게 센다.
 규약 어긋남(셋 · 규약 해시 · calibration 이 잴 셋으로 골라짐)은 compare.py 와 같이 exit 2.
@@ -119,8 +119,8 @@ def resolve(protocol, set_rows, runs, rerun):
     return out
 
 
-def lang_b(protocol, set_rows, runs):
-    """⑤ 언어별 b 재현. 셋 줄에 lang 칸이 하나도 없으면 None, 그 언어 b 쌍이 없으면 그 줄은 뺀다.
+def lang_b(protocol, set_rows, runs, metric="b_recall"):
+    """⑤ 언어별 재현(기본 b, g4 부터 c 도). 셋 줄에 lang 칸이 하나도 없으면 None, 그 언어 그 칸 쌍이 없으면 그 줄은 뺀다.
 
     resolve 를 lang 으로 거른 쌍에 돌린 것과 같은 셈이다 (g3 기준선 때 쓴 스크래치 lang_b_g3.py 를 옮김) —
     씨앗별 값 · 수준 구간 · 씨앗 짝(1v1) 붓스트랩 반폭 평균 · 그걸 ÷√씨앗 수 한 어림.
@@ -134,26 +134,27 @@ def lang_b(protocol, set_rows, runs):
     tables = [cmp.pair_hits([r], ids) for r in runs]
     all_table = cmp.pair_hits(runs, ids)
     out = {}
+    x = metric[0]
     for lang in LANGS:
-        positions = cmp.slice_positions(set_rows, all_table["ids"], {"metric": "b_recall", "lang": lang})
+        positions = cmp.slice_positions(set_rows, all_table["ids"], {"metric": metric, "lang": lang})
         subs = [cmp.sub_table(t, positions) for t in tables]
         sub_all = cmp.sub_table(all_table, positions)
         groups = [str(set_rows[pid].get(key) or pid) for pid in sub_all["ids"]]
-        level = cmp.cluster_bootstrap(groups, zero_table(sub_all), sub_all, "b_recall", n_boot, ci, rng)
+        level = cmp.cluster_bootstrap(groups, zero_table(sub_all), sub_all, metric, n_boot, ci, rng)
         if level["pairs"] == 0:
             continue
         halves = []
         for i in range(len(runs)):
             for j in range(i + 1, len(runs)):
-                s = cmp.cluster_bootstrap(groups, subs[i], subs[j], "b_recall", n_boot, ci, rng)
+                s = cmp.cluster_bootstrap(groups, subs[i], subs[j], metric, n_boot, ci, rng)
                 halves.append(round((s["high"] - s["low"]) / 2, 4))
         one = sum(halves) / len(halves) if halves else None
-        out[lang] = {"pairs": len(positions), "b_pairs": level["pairs"], "groups": level["groups"],
-                     "b_per_seed": [round(cmp.rate(t, "b_recall"), 4) for t in subs],
-                     "b_level": {"mean": level["new"], "low": level["low"], "high": level["high"],
-                                 "half": round((level["high"] - level["low"]) / 2, 4)},
-                     "b_estimate": None if one is None else {"one_vs_one": round(one, 4),
-                                                             "seed_mean": round(one / math.sqrt(len(runs)), 4)}}
+        out[lang] = {"pairs": len(positions), f"{x}_pairs": level["pairs"], "groups": level["groups"],
+                     f"{x}_per_seed": [round(cmp.rate(t, metric), 4) for t in subs],
+                     f"{x}_level": {"mean": level["new"], "low": level["low"], "high": level["high"],
+                                    "half": round((level["high"] - level["low"]) / 2, 4)},
+                     f"{x}_estimate": None if one is None else {"one_vs_one": round(one, 4),
+                                                                "seed_mean": round(one / math.sqrt(len(runs)), 4)}}
     return out
 
 
@@ -197,13 +198,14 @@ def to_markdown(result):
         lines += ["", f"- 같은 씨앗 재실행 {r['pair']} : acc3 차 {r['acc3']['diff']:+.4f} [{r['acc3']['low']:+.4f}, "
                   f"{r['acc3']['high']:+.4f}] · d 차 {r['d_recall']['diff']:+.4f} · 예측 바뀐 쌍 {r['pred_changed']} · "
                   f"씨앗 사이 acc3 폭 {r['seed_acc3_spread']:.4f} → 절반 넘나 {r['acc3_diff_over_half_spread']}"]
-    langs = result.get("lang_b")
-    if langs:
-        lines += ["", "| 언어 b | b 쌍 | 씨앗별 | 씨앗 평균 [95%] | 수준 반폭 | 1v1 반폭 평균 | 씨앗 평균 짝 반폭 어림 |",
+    for c, langs in (("b", result.get("lang_b")), ("c", result.get("lang_c"))):
+        if not langs:
+            continue
+        lines += ["", f"| 언어 {c} | {c} 쌍 | 씨앗별 | 씨앗 평균 [95%] | 수준 반폭 | 1v1 반폭 평균 | 씨앗 평균 짝 반폭 어림 |",
                   "| --- | --- | --- | --- | --- | --- | --- |"]
         for lang, x in langs.items():
-            lv, e = x["b_level"], x["b_estimate"] or {"one_vs_one": "—", "seed_mean": "—"}
-            lines.append(f"| {lang} | {x['b_pairs']} | {' · '.join(f'{v:.4f}' for v in x['b_per_seed'])} "
+            lv, e = x[f"{c}_level"], x[f"{c}_estimate"] or {"one_vs_one": "—", "seed_mean": "—"}
+            lines.append(f"| {lang} | {x[f'{c}_pairs']} | {' · '.join(f'{v:.4f}' for v in x[f'{c}_per_seed'])} "
                          f"| {lv['mean']} [{lv['low']}, {lv['high']}] | {lv['half']} | {e['one_vs_one']} | {e['seed_mean']} |")
     skipped = result.get("lang_b_skipped")
     if skipped:
@@ -246,7 +248,8 @@ def run(argv=None):
         rows.append(dict(run_metrics(rerun, ids), rerun=True))
     result = {"name": name, "protocol_sha256": protocol_sha, "set_sha256": set_sha, "set": os.path.basename(a.set),
               "runs": rows, "resolve": resolve(protocol, set_rows, runs, rerun),
-              "lang_b": lang_b(protocol, set_rows, runs), "lang_b_skipped": lang_b_skipped(set_rows)}
+              "lang_b": lang_b(protocol, set_rows, runs), "lang_b_skipped": lang_b_skipped(set_rows),
+              "lang_c": lang_b(protocol, set_rows, runs, "c_recall")}
     # 규약 release_pick 을 통째로 넘긴다 — lang · domain 거름이 있으면(g3 ko b) compare.py 와 같은 쌍으로 센다
     pick = protocol.get("release_pick", {})
     result["release_pick"] = cmp.pick_release(runs, ids, pick.get("metric", "d_recall"), set_rows, pick)

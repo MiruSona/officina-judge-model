@@ -402,6 +402,80 @@ class G3ReleaseTest(unittest.TestCase):
                          [{"metric": "b_recall", "lang": "ko", "min": 0.7}])
 
 
+PROTOCOL_G4 = os.path.join(helpers.ROOT, "measure", "protocol-g4.draft.json")
+
+
+class G4ReleaseTest(unittest.TestCase):
+    """protocol-g4 초안 — release_gate.min_groups 가 모자라면 거부, 넉넉하면 g3 와 같은 자 (K2 설계 5절 ⑦)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.fx = GateFixture(self._tmp.name, PROTOCOL_G4)
+        self.fx.calibrate("--fitted-on", self.fx.cal_set)
+        rows = make_pred()
+        write_jsonl(self.fx.blind_set, [{"id": r["id"], "label": "abcd"[r["label"]], "group": f"g{i % 8}",
+                                         "lang": lang_of(i), "blind": 1} for i, r in enumerate(rows)])
+        self.pred = self.fx.eval_dir("eval-blind-lang", rows, self.fx.blind_set)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def set_min_groups(self, value):
+        with open(self.fx.protocol, encoding="utf-8") as f:
+            protocol = json.load(f)
+        protocol["release_gate"]["min_groups"] = value
+        with open(self.fx.protocol, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(protocol, f, ensure_ascii=False, indent=1)
+        self.fx.protocol_sha = cmp.sha256_file(self.fx.protocol)
+        return self.fx.eval_dir("eval-blind-mg", make_pred(), self.fx.blind_set)
+
+    def test_draft_reads_without_todo(self):
+        protocol, _ = cmp.read_protocol(PROTOCOL_G4)
+        with open(PROTOCOL_G4, encoding="utf-8") as f:
+            self.assertNotIn("TODO", f.read())
+        self.assertEqual(protocol["release_gate"]["set"], "blind-g4")
+        self.assertEqual(protocol["release_gate"]["min_groups"], {"b@en": 200, "a": 380, "c": 260, "b@ko": 220})
+        self.assertEqual(protocol["pair_gate"]["target"]["metric"], "c_recall")
+        self.assertEqual(len(protocol["pair_gate"]["guards"]), 9)
+
+    def test_short_groups_refuse(self):
+        # 가짜 셋은 묶음 8개뿐 — 초안 min_groups 에 모자라 exit 2, 결과 파일을 안 쓴다
+        code, _, err = self.fx.release(self.fx.blind_set, self.pred, "--p95-ms", "400")
+        self.assertEqual(code, 2)
+        self.assertIn("b@en", err)
+        self.assertFalse(os.path.exists(os.path.join(self.fx.tmp, "gates.json")))
+
+    def test_enough_groups_same_rulers_as_g3(self):
+        pred = self.set_min_groups({"b@en": 1, "a": 2, "c": 2, "b@ko": 1})
+        code, out, _ = self.fx.release(self.fx.blind_set, pred, "--p95-ms", "400")
+        self.assertEqual(code, 0, out)
+        result, _ = self.fx.rulers()
+        self.assertEqual([r["ruler"] for r in result["rulers"]],
+                         ["b_recall", "b_recall@ko", "sure_false_support", "unsure", "p95_ms", "vs_ref_b_recall@ko",
+                          "vs_ref_b_recall", "vs_ref_b_recall@en", "vs_ref_acc3", "vs_ref_a_recall",
+                          "vs_ref_c_recall", "vs_ref_d_recall"])
+
+    def test_one_short_cell_refuses(self):
+        pred = self.set_min_groups({"b@en": 1, "a": 3, "c": 2, "b@ko": 1})
+        code, _, err = self.fx.release(self.fx.blind_set, pred)
+        self.assertEqual(code, 2)
+        self.assertIn("a", err)
+
+    def test_group_counts(self):
+        set_rows = {"p1": {"lang": "ko", "group": "x"}, "p2": {"lang": "ko", "group": "x"},
+                    "p3": {"lang": "en", "group": "y"}, "p4": {"lang": "en"}}
+        gold = [cmp.CONTRA, cmp.CONTRA, cmp.CONTRA, cmp.UNRELATED]
+        got = cmp.group_counts({"b": 1, "b@ko": 1, "b@en": 1, "c": 1, "d": 1}, set_rows, ["p1", "p2", "p3", "p4"],
+                               gold, "group")
+        self.assertEqual(got, {"b": 2, "b@ko": 1, "b@en": 1, "c": 1, "d": 0})
+
+    def test_group_counts_unknown_letter_refused(self):
+        # 리뷰 #9 : a~d 밖 자 이름은 a 로 세거나 ValueError 로 죽지 않고 거부
+        for name in ("e", "ab", "x@ko", ""):
+            with self.assertRaises(cmp.Refuse, msg=name):
+                cmp.group_counts({name: 1}, {"p1": {"group": "x"}}, ["p1"], [0], "group")
+
+
 class PreregSliceTest(unittest.TestCase):
     """prereg.criteria_from_gate — g3 걸러 쓴 자를 이름째 풀어 적고, g2 박제는 그대로."""
 
@@ -585,6 +659,28 @@ class BaselineLangTest(unittest.TestCase):
             self.assertEqual(got[lang]["b_pairs"], lv["pairs"])
             per_seed = [round(cmp.rate(cmp.pair_hits([r], list(sub)), "b_recall"), 4) for r in runs]
             self.assertEqual(got[lang]["b_per_seed"], per_seed)
+
+    def test_lang_c_rows(self):
+        # K2 설계 ⑩ : 같은 셈을 c 재현에 — 씨앗별 값은 lang 으로 거른 쌍의 rate, 쌍 수는 그 언어 c 쌍
+        set_path, protocol_path, spec = self.write_case(True, {"metric": "c_recall", "lang": "ko"})
+        set_rows = cmp.read_set(set_path)
+        _, runs = cmp.load_runs(spec)
+        got = baseline.lang_b({"bootstrap": {"n": 200}}, set_rows, runs, "c_recall")
+        self.assertEqual(list(got), ["ko", "en"])
+        for lang in ("ko", "en"):
+            sub = [pid for pid, row in set_rows.items() if row.get("lang") == lang]
+            per_seed = [round(cmp.rate(cmp.pair_hits([r], sub), "c_recall"), 4) for r in runs]
+            self.assertEqual(got[lang]["c_per_seed"], per_seed)
+            self.assertEqual(got[lang]["c_pairs"], sum(1 for pid in sub if set_rows[pid]["label"] == "c"))
+            self.assertNotIn("b_level", got[lang])
+        code, out, err = quiet(baseline.main, ["--protocol", protocol_path, "--set", set_path, "--runs", spec,
+                                               "--out", os.path.join(self.tmp, "b.json")])
+        self.assertEqual(code, 0, err)
+        result = cmp.read_json(os.path.join(self.tmp, "b.json"))
+        self.assertEqual(result["lang_c"]["ko"]["c_per_seed"], got["ko"]["c_per_seed"])
+        self.assertEqual(result["lang_b"], baseline.lang_b({"bootstrap": {"n": 200}}, set_rows, runs))
+        self.assertIn("| 언어 c |", out)
+        self.assertIn("| 언어 b |", out)
 
     def test_lang_b_none_without_lang(self):
         set_path, _, spec = self.write_case(False, {"metric": "d_recall"})

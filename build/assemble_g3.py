@@ -28,6 +28,7 @@ import collections
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -45,6 +46,10 @@ LABEL_GUIDE = "support-v6"
 NEW_TAG, CARRY_TAG = "v6-new", "g2-carry"
 KO_B_MIN = {"dev-cmp-g3": 250, "blind-g3": 250}       # 설계 2-3 (dev-cmp-g3 ko b 약 285 · blind-g3 ≥ 250)
 WAIT_STATUS = ("missing", "need-third")
+HASH_ID = re.compile(r"-h([0-9a-f]{8})$")    # g4 near-x id 꼬리 = 쌍 sha_key 앞 8자 (make_sets.near_c hash_id)
+# 판 이름 칸 — tag : 새 줄 · 이은 줄 꼬리표 칸, carry_key : 이은 줄의 옛 셋 이름 칸, base : 셋 → 이을 셋, prefix : 요약 칸 머리
+Gen = collections.namedtuple("Gen", "tag carry_key carry_tag base prefix")
+G3 = Gen("g3_label", "g2_set", CARRY_TAG, G2_BASE, "g2")
 
 
 class Stop(Exception):
@@ -100,7 +105,15 @@ def load_decisions(dirs):
 
 
 def resolve(cand, decisions):
-    """후보 → (칸, votes, status, 상태). 상태 : judge · decided · dropped · pending."""
+    """후보 → (칸, votes, status, 상태). 상태 : judge · decided · dropped · pending.
+    id 꼬리에 쌍 해시가 있으면(g4) 후보 쌍과 대조하고, 판정 줄에 pair_sha 가 있으면 그것도 대조해 다르면 멈춘다 —
+    다시 뽑아 입력이 바뀐 뒤 옛 판정이 다른 쌍에 조용히 붙지 않게."""
+    mark = HASH_ID.search(cand["id"])
+    if mark and sha_key(cand)[:8] != mark.group(1):
+        raise Stop(f"{cand['id']} : id 의 쌍 해시와 후보 쌍이 다르다")
+    dec_sha = (decisions.get(cand["id"]) or {}).get("pair_sha")
+    if dec_sha and dec_sha != sha_key(cand):
+        raise Stop(f"{cand['id']} : 판정 줄의 쌍 해시와 후보 쌍이 다르다")
     label, votes, status = judge_label(cand)
     if label:
         want = cand.get("want")
@@ -117,23 +130,23 @@ def resolve(cand, decisions):
     return dec["label"], dict(dec.get("votes") or {}), dec["status"], "decided"
 
 
-def new_row(cand, label, votes, status, set_name):
-    row = {k: v for k, v in cand.items() if k not in ("judge", "g3_label")}
+def new_row(cand, label, votes, status, set_name, gen=G3):
+    row = {k: v for k, v in cand.items() if k not in ("judge", "g3_label", gen.tag)}
     if "hint_pick" not in row:
         row["hint_pick"] = cand.get("hint", "")
     row.update(want=label, hint=label, label_guide=LABEL_GUIDE, set=set_name, votes=votes or {}, status=status,
-               g3_label=NEW_TAG)
+               **{gen.tag: NEW_TAG})
     return row
 
 
-def carry_row(row, set_name):
-    return dict(row, set=set_name, g2_set=row.get("set", ""), g3_label=CARRY_TAG)
+def carry_row(row, set_name, gen=G3):
+    return dict(row, set=set_name, **{gen.carry_key: row.get("set", ""), gen.tag: gen.carry_tag})
 
 
 # ---------------------------------------------------------------- 조립
 
-def assemble(set_name, cands, g2_rows, decisions, draft):
-    """→ (셋 줄, 요약). 판정 전 줄은 draft 면 세어서 빼고 아니면 Stop."""
+def assemble(set_name, cands, g2_rows, decisions, draft, gen=G3):
+    """→ (셋 줄, 요약). 판정 전 줄은 draft 면 세어서 빼고 아니면 Stop. g2_rows 는 이을 셋 줄(gen.base)."""
     by_state = collections.Counter()
     pending = collections.Counter()
     dropped = collections.Counter()
@@ -151,10 +164,10 @@ def assemble(set_name, cands, g2_rows, decisions, draft):
         if state == "dropped":
             dropped[cand.get("domain", "")] += 1
             continue
-        new.append(new_row(cand, label, votes, status, set_name))
+        new.append(new_row(cand, label, votes, status, set_name, gen))
     if pending and not draft:
         raise Stop(f"{set_name} : 판정 전 줄 {sum(pending.values())} — 판정을 끝내거나 --draft")
-    carried = [carry_row(r, set_name) for r in g2_rows]
+    carried = [carry_row(r, set_name, gen) for r in g2_rows]
     # 같은 (근거, 주장) 정규형 — g2 줄 먼저 잡고, 새 줄끼리는 id 작은 줄
     seen, deduped = {}, []
     for r in carried:
@@ -176,9 +189,9 @@ def assemble(set_name, cands, g2_rows, decisions, draft):
     dup = sorted(i for i, n in ids.items() if n > 1)
     if dup:
         raise Stop(f"{set_name} : 같은 id {len(dup)} (예 {dup[0]})")
-    summary = summarize(set_name, rows, draft)
+    summary = summarize(set_name, rows, draft, gen)
     summary.update({
-        "g2_base": G2_BASE[set_name], "g2_pairs": len(carried), "new_pairs": len(kept),
+        f"{gen.prefix}_base": gen.base[set_name], f"{gen.prefix}_pairs": len(carried), "new_pairs": len(kept),
         "cands": len(cands), "cand_state": dict(sorted(by_state.items())),
         "pending": sum(pending.values()),
         "pending_by": {f"{d} · hint {h}": n for (d, h), n in sorted(pending.items())},
@@ -194,8 +207,8 @@ def table(rows, key):
     return {k: dict(sorted(c.items())) for k, c in sorted(out.items())}
 
 
-def summarize(set_name, rows, draft):
-    new = [r for r in rows if r.get("g3_label") == NEW_TAG]
+def summarize(set_name, rows, draft, gen=G3):
+    new = [r for r in rows if r.get(gen.tag) == NEW_TAG]
     return {
         "set": set_name, "draft": bool(draft), "pairs": len(rows),
         "want": dict(sorted(collections.Counter(r["want"] for r in rows).items())),
@@ -203,7 +216,7 @@ def summarize(set_name, rows, draft):
         "new_domain_want": table(new, "domain"), "new_lang_want": table(new, "lang"),
         "ko_b": sum(1 for r in rows if r.get("lang") == "ko" and r["want"] == "b"),
         "label_guides": dict(sorted(collections.Counter(r.get("label_guide", "") for r in rows).items())),
-        "g3_label": dict(sorted(collections.Counter(r["g3_label"] for r in rows).items())),
+        gen.tag: dict(sorted(collections.Counter(r[gen.tag] for r in rows).items())),
     }
 
 
