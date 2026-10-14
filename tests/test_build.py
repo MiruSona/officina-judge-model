@@ -822,3 +822,54 @@ class PoolArchiveTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class G2MiningTest(unittest.TestCase):
+    """v1.2 B 판 b 후보 — 한 줄 고침(이름 바꾸기 거름) · VitaminC 대조쌍."""
+
+    def test_rename_rule(self):
+        self.assertTrue(ma.is_rename("규칙은 Tools/Draw/README.md 에 적는다.", "규칙은 DiagramTool/src/README.md 에 적는다."))
+        self.assertTrue(ma.is_rename("JudgeTool 이 판정을 맡는다.", "JudgeModel 이 판정을 맡는다.",
+                                     frozenset({("JudgeTool", "JudgeModel")})))
+        self.assertFalse(ma.is_rename("층 이름은 Handler 로 둔다.", "층 이름은 Util 로 둔다."))       # 한 번뿐인 바꿈은 남김
+        self.assertFalse(ma.is_rename("캐시는 Tools/a 에 3개 둔다.", "캐시는 Tools/b 에 4개 둔다."))   # 수가 바뀜
+
+    def test_revision_keeps_one_line_edit_and_drops_rename(self):
+        with tempfile.TemporaryDirectory() as repo:
+            subprocess.run(["git", "init", "-q", repo], check=True, capture_output=True)
+            doc = "# 캐시\n\n캐시는 마지막 열 개 결과를 남기기로 했다.\n\n설명은 Tools/Draw/README.md 에 있다고 적는다.\n"
+            git_commit(repo, {"Docs/cache.md": doc}, "캐시 문서")
+            git_commit(repo, {"Docs/cache.md": doc.replace("열 개", "스무 개")}, "캐시 크기 고침")
+            git_commit(repo, {"Docs/cache.md": doc.replace("열 개", "스무 개").replace("Tools/Draw/", "DiagramTool/src/")},
+                       "경로 고침")
+            git_commit(repo, {"Memory/x.md": "기억 한 줄은 이렇게 적어 두었다.\n"}, "기억")
+            git_commit(repo, {"Memory/x.md": "기억 한 줄은 저렇게 적어 두었다.\n"}, "기억 고침")
+            col = ma.mine_revision([("t", repo)], random.Random(1))
+        self.assertEqual(len(col.rows), 1)
+        row = col.rows[0]
+        self.assertIn("스무 개", row["evidence"])                 # 근거 = 고친 뒤
+        self.assertIn("열 개", row["claim"])                      # 주장 = 고치기 전
+        self.assertEqual((row["hint"], row["form"], row["group"]), ("b", "edit", "doc:t:Docs/cache.md"))
+        self.assertEqual(col.dropped["rename"], 1)
+        self.assertEqual(col.dropped["skip_dir"], 1)
+
+    def test_vitaminc_g2_contrast_pairs_and_heldout_b(self):
+        def fake_rows(path):
+            split = os.path.basename(path)
+            base = {"revision_type": "real", "page": "P " + split, "case_id": "c1"}
+            claim = "The band sold more than 5000 copies in its first week ."
+            return [dict(base, unique_id="c1_1", label="SUPPORTS", claim=claim,
+                         evidence="The band sold 6000 copies in its first week after release ."),
+                    dict(base, unique_id="c1_2", label="REFUTES", claim=claim,
+                         evidence="The band sold 4000 copies in its first week after release ."),
+                    dict(base, unique_id="c1_3", label="REFUTES", claim="The band has never released any album at all .",
+                         evidence="The band released its first album in the spring of 2001 ."),
+                    dict(base, unique_id="c1_4", label="SUPPORTS", revision_type="synthetic", claim=claim,
+                         evidence="The band sold 7000 copies in its first week after release .")]
+        train = mp.mine_vitaminc_g2("raw", random.Random(1), "train", read_rows=fake_rows)
+        held = mp.mine_vitaminc_g2("raw", random.Random(1), "heldout", read_rows=fake_rows)
+        self.assertEqual(sorted((r["hint"], r["form"]) for r in train.rows), [("a", "contrast"), ("b", "contrast")])
+        self.assertEqual(len({r["pair"] for r in train.rows}), 1)
+        self.assertTrue(all(r["domain"] == "vitaminc" and r["group"] == "vitc:P train.parquet" for r in train.rows))
+        self.assertEqual(sorted(r["src_ids"][0] for r in held.rows), ["c1_2", "c1_2", "c1_3", "c1_3"])  # 두 파일
+        self.assertTrue(all(r["hint"] == "b" and r["split"] == "heldout" for r in held.rows))

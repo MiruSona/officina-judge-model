@@ -2,7 +2,7 @@
 
     python -I prereg.py --model-dir ~/.judgemodel/models/nli-studio-v1 \
         --set game90=<game90.jsonl> --set k48=<k48.jsonl> --once game90 --judge game90 --out <git 밖>/prereg.json
-        [--protocol measure/protocol-g1.json]
+        [--protocol measure/protocol-g1.json] [--next <다음 걸음 json>]
 
 이미 있으면 덮지 않는다 — 잰 뒤 자를 옮기지 않게. 문턱은 model.json scores.thresholds 에서 읽는다.
 model.json letters 가 넷이면 자를 --protocol 규약의 release_gate 에서 읽어(gates.py 와 같은 파일) 문턱 셋
@@ -19,6 +19,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import compare as cmp  # noqa: E402
+import gates  # noqa: E402
 
 DEFAULT_PROTOCOL = os.path.join(HERE, "protocol-g1.json")
 
@@ -41,6 +42,27 @@ GATE_TO_CRITERIA = {
     "p95_ms_max": "p95_ms_max",                                  # HTTP 포함 · 한 번 묻기
 }
 GATE_OPTIONAL = ("fold_wrong_max",)  # 규약에 있을 때만 옮긴다 (fold40 · run_fold.py)
+# g2 규약(vs_ref 칸이 있는 판) : 절대 자는 b 재현 · 확신 거짓 지지 · p95, 나머지는 기준 모델 대비 — 판정은 gates.py release
+GATE_TO_CRITERIA_G2 = {
+    "b_recall_min": "contradict_recall_min",
+    "sure_false_support_share_max": "false_support_share_max",
+    "unsure_vs_ref_max_diff": "unsure_vs_ref_max_diff",          # 보류 ≤ 기준 모델 보류 + 이 값
+    "vs_ref": "vs_ref",                                          # [{metric, ci_low_gt | ci_low_ge}] 같은 쌍 차 아래끝
+    "ref_model": "ref_model",
+    "p95_ms_max": "p95_ms_max",
+}
+NEXT_G2 = {
+    "pass": "gates.py release 통과 — 8092 교체는 사용자가 정한다 (B판 설계 5-4)",
+    "p95_only": "int8 → 그래도 넘으면 v1.1.0 유지",
+    "fail": "B 판을 접고 결과만 적는다 · 8092 는 v1.1.0 그대로 (B판 설계 5-3)",
+}
+NEXT_G3 = {
+    "pass": "gates.py release 통과 — 8092 교체는 사용자가 정한다",
+    "p95_only": "int8 → 그래도 넘으면 K 판은 내지 않고 8092 는 v1.1.0 유지",
+    "fail": "출시 관문 미달 — K 판은 내지 않고 8092 는 v1.1.0 유지 · 다음 판은 새 blind 셋",
+}
+# 기준 모델 대비 규약(vs_ref)의 다음 걸음 — 규약 파일 이름으로 고른다. 표에 없는 이름은 --next 로 준다.
+NEXT_BY_PROTOCOL = {"protocol-g2.json": NEXT_G2, "protocol-g3.json": NEXT_G3}
 NEXT_V2 = {
     "pass": "nli-studio-v3 를 꽂는다 (응답 nli-v2) · 손님 판올림 · 진행상황 · mem history",
     "p95_only": "int8 → 그래도 넘으면 옛 서버(nli-studio-v2) 유지",
@@ -59,17 +81,69 @@ def sha256_file(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
+def is_g2_gate(gate):
+    """기준 모델 대비 자(vs_ref 목록)가 있는 규약인가 — protocol-g2 부터."""
+    return "vs_ref" in gate
+
+
 def criteria_from_gate(gate):
     """규약 release_gate → 4칸 criteria. 빠진 칸이 있으면 멈춘다 (어림값으로 채우지 않는다)."""
-    missing = [k for k in GATE_TO_CRITERIA if k not in gate]
+    mapping = GATE_TO_CRITERIA
+    if is_g2_gate(gate):
+        mapping = GATE_TO_CRITERIA_G2
+    missing = [k for k in mapping if k not in gate]
     if missing:
         raise SystemExit(f"규약 release_gate 에 {', '.join(missing)} 가 없다")
-    criteria = {dst: gate[src] for src, dst in GATE_TO_CRITERIA.items()}
+    criteria = {dst: gate[src] for src, dst in mapping.items()}
     criteria.update({k: gate[k] for k in GATE_OPTIONAL if k in gate})
+    if is_g2_gate(gate):
+        criteria.update(slice_criteria(gate))
     return criteria
 
 
-def build(model_spec, sets, once, judge, protocol=None, protocol_path="", protocol_sha=""):
+def slice_criteria(gate):
+    """g3 꼴(거름 칸 lang · domain 이 달린 자)을 박제 문서에 읽기 쉽게 푼다.
+
+    b_recall_min 이 목록 · dict 이면 contradict_recall_min 은 쌍 전체 b 자(없으면 None) — 거름이 없어도 숫자 하나로 푼다.
+    걸러진 자는 recall_min_by_slice {b_recall@ko: .70}, vs_ref 는 vs_ref_rulers [{ruler, need}] 로 이름째 적는다.
+    숫자 하나인 옛 꼴이면 빈 dict — g2 박제는 그대로.
+    """
+    mins = gates.recall_min_specs(gate["b_recall_min"])
+    whole = next((s["min"] for s in mins if not cmp.is_slice(s)), None)
+    vs_ref = gate.get("vs_ref", [])
+    if not any(cmp.is_slice(s) for s in mins + vs_ref):
+        if isinstance(gate["b_recall_min"], (int, float)):
+            return {}
+        return {"contradict_recall_min": whole}
+    out = {"contradict_recall_min": whole,
+           "recall_min_by_slice": {cmp.ruler_name(s): s["min"] for s in mins if cmp.is_slice(s)},
+           "vs_ref_rulers": []}
+    for spec in vs_ref:
+        need = f"> {spec['ci_low_gt']}" if "ci_low_gt" in spec else f">= {spec['ci_low_ge']}"
+        out["vs_ref_rulers"].append({"ruler": f"vs_ref_{cmp.ruler_name(spec)}", "need": f"차 95% 아래끝 {need}"})
+    return out
+
+
+def next_for_gate(protocol_path, next_text=None):
+    """vs_ref 규약의 다음 걸음 — --next 로 받은 것 → 규약 파일 이름 표. 둘 다 없으면 멈춘다(다른 판 문구를 박지 않게)."""
+    if next_text is not None:
+        return next_text
+    name = os.path.basename(protocol_path or "")
+    if name not in NEXT_BY_PROTOCOL:
+        raise SystemExit(f"규약 {name or '(이름 없음)'} 의 다음 걸음 표가 없다 — --next <json 파일> 로 준다")
+    return NEXT_BY_PROTOCOL[name]
+
+
+def read_next(path):
+    """--next json 파일 → 다음 걸음 dict. dict 가 아니면 멈춘다."""
+    with open(path, encoding="utf-8") as f:
+        doc = json.load(f)
+    if not isinstance(doc, dict) or not doc:
+        raise SystemExit(f"--next 파일은 비지 않은 json 객체여야 한다 : {path}")
+    return doc
+
+
+def build(model_spec, sets, once, judge, protocol=None, protocol_path="", protocol_sha="", next_text=None):
     thresholds = (model_spec.get("scores") or {}).get("thresholds") or {}
     if thresholds.get("nli_sure") is None or thresholds.get("nli_sure_support") is None:
         raise SystemExit("model.json scores.thresholds 에 nli_sure · nli_sure_support 가 없다 — calibrate 뒤 내보낸다")
@@ -91,11 +165,15 @@ def build(model_spec, sets, once, judge, protocol=None, protocol_path="", protoc
             raise SystemExit("4칸 모델은 --protocol 규약의 release_gate 로 자를 박제한다 — 규약이 없다")
         out["criteria"] = criteria_from_gate(protocol["release_gate"])
         out["release_gate"] = protocol["release_gate"]
+        if is_g2_gate(protocol["release_gate"]):
+            out["next"] = next_for_gate(protocol_path, next_text)
         out["protocol_file"] = os.path.basename(protocol_path)
         out["protocol_sha256"] = protocol_sha
         out["nli_sure_related"] = thresholds["nli_sure_related"]
         out["letters"] = list(letters)
         out["protocol"] = model_spec.get("protocol", "nli-v2")
+    if next_text is not None:
+        out["next"] = next_text
     return out
 
 
@@ -109,6 +187,8 @@ def main(argv=None):
     p.add_argument("--out", required=True)
     p.add_argument("--protocol", default=DEFAULT_PROTOCOL,
                    help="4칸 자를 읽을 규약 (release_gate) · 기본 measure/protocol-g1.json")
+    p.add_argument("--next", dest="next_file", default=None,
+                   help="다음 걸음 json 파일 · 없으면 규약 파일 이름 표(protocol-g2 · protocol-g3)에서 고른다")
     a = p.parse_args(argv)
     if os.path.exists(a.out):
         raise SystemExit(f"이미 있다: {a.out} — 사전 등록은 덮지 않는다")
@@ -116,7 +196,8 @@ def main(argv=None):
         spec = json.load(f)
     sets = dict(s.split("=", 1) for s in a.sets)
     protocol, protocol_sha = cmp.read_protocol(a.protocol)
-    prereg = build(spec, sets, set(a.once), set(a.judge), protocol, a.protocol, protocol_sha)
+    next_text = read_next(a.next_file) if a.next_file else None
+    prereg = build(spec, sets, set(a.once), set(a.judge), protocol, a.protocol, protocol_sha, next_text)
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     with open(a.out, "w", encoding="utf-8", newline="\n") as f:
         json.dump(prereg, f, ensure_ascii=False, indent=1)

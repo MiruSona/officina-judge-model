@@ -2,7 +2,8 @@
 
     python -I gates.py release --protocol measure/protocol-g1.json --set <blind-g1.jsonl> \
         --pred runs/g1-B1-s2/eval-blind/pred.jsonl --calibration runs/g1-B1-s2/calibration.json \
-        [--ref-pred <v1.0.0 pred.jsonl>] [--p95-ms 414] [--out gates.json] [--md gates.md]
+        [--ref-pred <기준 모델 pred.jsonl>] [--ref-calibration <기준 모델 calibration.json>] [--p95-ms 414] \
+        [--out gates.json] [--md gates.md]
     python -I gates.py pair <compare.py 인자 그대로>
     python -I gates.py legacy r2-02/diag.json r2-03/diag.json      # 옛 dev 관문 8 + 곁 3 (eval-side.txt)
 
@@ -43,49 +44,132 @@ def check_release_hashes(protocol, protocol_sha, set_sha, run, calibration):
         raise Refuse("calibration 에 문턱(thresholds)이 없다 — --temperature-only 판으로는 릴리스 관문을 못 잰다")
 
 
-def release_gate(protocol, set_rows, run, calibration, ref_run=None, p95_ms=None):
-    """릴리스 자 여덟 → 줄마다 (자, 값, 기준, 통과). 잴 수 없는 자는 통과 None."""
+def release_gate(protocol, set_rows, run, calibration, ref_run=None, p95_ms=None, ref_calibration=None):
+    """릴리스 자 → 줄마다 (자, 값, 기준, 통과). 잴 수 없는 자는 통과 None.
+
+    규약에 있는 칸만 잰다 — g1 은 절대 자(acc3_min · unsure_max · d_*), g2 는 vs_ref 목록 · unsure_vs_ref_max_diff.
+    g3 는 b_recall_min · vs_ref 항목에 거름 칸(lang · domain)을 달 수 있다 — 자 이름 b_recall@ko · vs_ref_b_recall@ko.
+    """
     gate = protocol["release_gate"]
-    ids = list(set_rows)
-    table = cmp.pair_hits([run], ids)
+    table = cmp.pair_hits([run], list(set_rows))
     th = calibration["thresholds"]
-    scored = [(cal.softmax(run["preds"][i]["logits"], calibration["temperature"]), run["preds"][i]["label"])
-              for i in table["ids"]]
+    scored = scored_rows(run, table["ids"], calibration)
     non_support = sum(1 for _, label in scored if label != cmp.SUPPORT)
     sure_fs = cal.false_support(scored, th["nli_sure_support"])
-    unsure = cal.unsure_rate(scored, th["nli_sure"], th["nli_sure_support"], th.get("nli_sure_related"))
-    d_prec = None
-    if th.get("nli_sure_related") is not None:
-        d_prec = cal.sure_related_precision(scored, th["nli_sure_related"])[0]
-    rows = [
-        ("acc3", cmp.rate(table, "acc3"), f">= {gate['acc3_min']}", ge(cmp.rate(table, "acc3"), gate["acc3_min"])),
-        ("b_recall", cmp.rate(table, "b_recall"), f">= {gate['b_recall_min']}", ge(cmp.rate(table, "b_recall"), gate["b_recall_min"])),
-        ("sure_false_support", sure_fs, f"<= {non_support} × {gate['sure_false_support_share_max']}",
-         sure_fs <= non_support * gate["sure_false_support_share_max"] + 1e-9),
-        ("unsure", round(unsure, 4), f"<= {gate['unsure_max']}", unsure <= gate["unsure_max"] + 1e-9),
-        ("d_recall", cmp.rate(table, "d_recall"), f">= {gate['d_recall_min']}", ge(cmp.rate(table, "d_recall"), gate["d_recall_min"])),
-        ("d_sure_precision", d_prec, f">= {gate['d_sure_precision_min']}", ge(d_prec, gate["d_sure_precision_min"])),
-        ("p95_ms", p95_ms, f"<= {gate['p95_ms_max']}", None if p95_ms is None else p95_ms <= gate["p95_ms_max"]),
-    ]
-    rows.append(vs_ref_row(protocol, set_rows, table, run, ref_run))
+    rows = []
+    if "acc3_min" in gate:
+        rows.append(min_row(table, "acc3", gate["acc3_min"]))
+    rows.extend(recall_min_rows(set_rows, table, gate["b_recall_min"]))
+    rows.append(("sure_false_support", sure_fs, f"<= {non_support} × {gate['sure_false_support_share_max']}",
+                 sure_fs <= non_support * gate["sure_false_support_share_max"] + 1e-9))
+    rows.append(unsure_row(gate, unsure_of(scored, th), ref_run, ref_calibration, table["ids"]))
+    if "d_recall_min" in gate:
+        rows.append(min_row(table, "d_recall", gate["d_recall_min"]))
+    if "d_sure_precision_min" in gate:
+        d_prec = None
+        if th.get("nli_sure_related") is not None:
+            d_prec = cal.sure_related_precision(scored, th["nli_sure_related"])[0]
+        rows.append(("d_sure_precision", d_prec, f">= {gate['d_sure_precision_min']}",
+                     ge(d_prec, gate["d_sure_precision_min"])))
+    rows.append(("p95_ms", p95_ms, f"<= {gate['p95_ms_max']}", None if p95_ms is None else p95_ms <= gate["p95_ms_max"]))
+    rows.extend(vs_ref_rows(protocol, set_rows, table, ref_run))
     return [{"ruler": r[0], "value": round(r[1], 4) if isinstance(r[1], float) else r[1], "need": r[2], "ok": r[3]}
             for r in rows]
 
 
-def vs_ref_row(protocol, set_rows, table, run, ref_run):
-    """v1.0.0 견줌 — 같은 쌍 3칸 정확도 차의 묶음 붓스트랩 아래끝 · McNemar(보고)."""
-    need = f"차 95% 아래끝 >= {protocol['release_gate']['vs_ref_acc3_ci_low_ge']}"
-    if ref_run is None:
-        return ("vs_ref_acc3", None, need, None)
-    ref = cmp.pair_hits([ref_run], table["ids"])
-    cmp.check_same_pairs(ref, table, "기준 모델 pred 와 잴 판")
-    key = protocol.get("group_key", "group")
-    groups = [str(set_rows[pid].get(key) or pid) for pid in table["ids"]]
+def scored_rows(run, ids, calibration):
+    return [(cal.softmax(run["preds"][i]["logits"], calibration["temperature"]), run["preds"][i]["label"])
+            for i in ids]
+
+
+def unsure_of(scored, th):
+    return cal.unsure_rate(scored, th["nli_sure"], th["nli_sure_support"], th.get("nli_sure_related"))
+
+
+def min_row(table, metric, limit):
+    value = cmp.rate(table, metric)
+    return (metric, value, f">= {limit}", ge(value, limit))
+
+
+def recall_min_specs(value):
+    """b_recall_min 칸 → 절대 자 목록. 옛 꼴은 숫자 하나(쌍 전체 b 재현),
+    g3 꼴은 {"metric": "b_recall", "lang": "ko", "min": 0.70} 하나나 그 목록 (숫자를 섞으면 쌍 전체 b 재현)."""
+    items = value if isinstance(value, list) else [value]
+    return [{"metric": "b_recall", "min": v} if isinstance(v, (int, float)) else v for v in items]
+
+
+def recall_min_rows(set_rows, table, value):
+    """절대 재현 자 줄 — 거름 칸이 있으면 걸러진 쌍만 센다. 자 이름은 b_recall · b_recall@ko.
+    걸러진 쌍 중 셀 쌍이 0 이면 Refuse (compare.slice_compare 와 같다 — 규약 · 셋 칸이 어긋남)."""
+    rows = []
+    for spec in recall_min_specs(value):
+        sub = table
+        if cmp.is_slice(spec):
+            sub = cmp.sub_table(table, cmp.slice_positions(set_rows, table["ids"], spec))
+        _, rate, need, ok = min_row(sub, spec["metric"], spec["min"])
+        if rate is None and cmp.is_slice(spec):
+            raise Refuse(f"자 {cmp.ruler_name(spec)} 에 셀 쌍이 없다 — 셋의 {' · '.join(cmp.SLICE_KEYS)} 칸과 규약을 본다")
+        rows.append((cmp.ruler_name(spec), rate, need, ok))
+    return rows
+
+
+def unsure_row(gate, unsure, ref_run, ref_calibration, ids):
+    """보류 몫 — g1 은 절대 한도(unsure_max), g2 는 기준 모델 보류 + 차(unsure_vs_ref_max_diff, 기준 모델 제 문턱으로)."""
+    if "unsure_max" in gate:
+        return ("unsure", round(unsure, 4), f"<= {gate['unsure_max']}", unsure <= gate["unsure_max"] + 1e-9)
+    diff = gate["unsure_vs_ref_max_diff"]
+    if ref_run is None or ref_calibration is None or not ref_calibration.get("thresholds"):
+        return ("unsure", round(unsure, 4), f"<= ref 보류 + {diff} (ref calibration 없음)", None)
+    ref_unsure = unsure_of(scored_rows(ref_run, ids, ref_calibration), ref_calibration["thresholds"])
+    return ("unsure", round(unsure, 4), f"<= {ref_unsure:.4f} + {diff}", unsure <= ref_unsure + diff + 1e-9)
+
+
+def vs_ref_specs(gate):
+    """견줌 자 목록 — g2 는 vs_ref 칸 그대로, g1 은 옛 칸 vs_ref_acc3_ci_low_ge 하나를 같은 꼴로."""
+    if "vs_ref" in gate:
+        return gate["vs_ref"]
+    if "vs_ref_acc3_ci_low_ge" in gate:
+        return [{"metric": "acc3", "ci_low_ge": gate["vs_ref_acc3_ci_low_ge"]}]
+    return []
+
+
+def vs_ref_rows(protocol, set_rows, table, ref_run):
+    """기준 모델 견줌 — 지표마다 같은 쌍 차의 묶음 붓스트랩 아래끝 · McNemar(보고)."""
+    specs = vs_ref_specs(protocol["release_gate"])
+    ref = None
+    groups = None
+    if ref_run is not None and specs:
+        ref = cmp.pair_hits([ref_run], table["ids"])
+        cmp.check_same_pairs(ref, table, "기준 모델 pred 와 잴 판")
+        key = protocol.get("group_key", "group")
+        groups = [str(set_rows[pid].get(key) or pid) for pid in table["ids"]]
     boot = protocol.get("bootstrap", {})
-    s = cmp.cluster_bootstrap(groups, ref, table, "acc3", boot.get("n", 10000), boot.get("ci", 0.95),
-                              boot.get("rng_seed", 20261011))
-    s["mcnemar"] = cmp.mcnemar_exact(cmp.majority(ref, "acc3"), cmp.majority(table, "acc3"))
-    return ("vs_ref_acc3", s, need, s["low"] >= protocol["release_gate"]["vs_ref_acc3_ci_low_ge"] - 1e-9)
+    rows = []
+    for spec in specs:
+        metric = spec["metric"]
+        name = f"vs_ref_{cmp.ruler_name(spec)}"
+        if "ci_low_gt" in spec:
+            need = f"차 95% 아래끝 > {spec['ci_low_gt']}"
+        else:
+            need = f"차 95% 아래끝 >= {spec['ci_low_ge']}"
+        if ref is None:
+            rows.append((name, None, need, None))
+            continue
+        if cmp.is_slice(spec):
+            # g3 꼴 {"metric": "b_recall", "lang": "ko", …} — 걸러진 쌍만으로 같은 셈 (짝 비교와 같은 함수)
+            s = cmp.slice_compare(protocol, set_rows, ref, table, spec)
+        else:
+            s = cmp.cluster_bootstrap(groups, ref, table, metric, boot.get("n", 10000), boot.get("ci", 0.95),
+                                      boot.get("rng_seed", 20261011))
+            s["mcnemar"] = cmp.mcnemar_exact(cmp.majority(ref, metric), cmp.majority(table, metric))
+        if s["low"] is None:
+            ok = None
+        elif "ci_low_gt" in spec:
+            ok = s["low"] > spec["ci_low_gt"]
+        else:
+            ok = s["low"] >= spec["ci_low_ge"] - 1e-9
+        rows.append((name, s, need, ok))
+    return rows
 
 
 def ge(value, limit):
@@ -142,7 +226,9 @@ def run_release(argv):
     p.add_argument("--set", required=True, help="잴 셋 jsonl (blind-g1)")
     p.add_argument("--pred", required=True, help="릴리스 판의 eval_nli pred.jsonl (또는 그 폴더)")
     p.add_argument("--calibration", required=True, help="dev-cal 로 고른 calibration.json")
-    p.add_argument("--ref-pred", default="", help="v1.0.0 의 같은 셋 pred.jsonl (견줌 자)")
+    p.add_argument("--ref-pred", default="", help="기준 모델(규약 ref_model)의 같은 셋 pred.jsonl (견줌 자)")
+    p.add_argument("--ref-calibration", default="",
+                   help="기준 모델의 calibration.json (g2 보류 자). 비면 --ref-pred 옆 · 윗 폴더의 것")
     p.add_argument("--p95-ms", type=float, default=None)
     p.add_argument("--out", default="")
     p.add_argument("--md", default="")
@@ -153,8 +239,16 @@ def run_release(argv):
     run = cmp.load_run(a.pred)
     calibration = cmp.read_json(a.calibration)
     check_release_hashes(protocol, protocol_sha, set_sha, run, calibration)
-    ref_run = cmp.load_run(a.ref_pred) if a.ref_pred else None
-    rows = release_gate(protocol, set_rows, run, calibration, ref_run, a.p95_ms)
+    ref_run = None
+    ref_calibration = None
+    if a.ref_pred:
+        ref_run = cmp.load_run(a.ref_pred)
+        ref_calibration = ref_run["calibration"]
+    if a.ref_calibration:
+        ref_calibration = cmp.read_json(a.ref_calibration)
+    if ref_calibration is not None and cmp.calib_sha(ref_calibration) == set_sha:
+        raise Refuse("기준 모델 calibration 이 잴 셋으로 골랐다 — 문턱 · 온도는 dev-cal 로만 고른다")
+    rows = release_gate(protocol, set_rows, run, calibration, ref_run, a.p95_ms, ref_calibration)
     result = {"protocol_sha256": protocol_sha, "set_sha256": set_sha, "pred": run["path"],
               "calibration": os.path.abspath(a.calibration), "verdict": release_word(rows), "rulers": rows}
     lines = [f"## 릴리스 관문 : **{result['verdict']}**", "", "| 자 | 값 | 기준 | 통과 |", "| --- | --- | --- | --- |"]

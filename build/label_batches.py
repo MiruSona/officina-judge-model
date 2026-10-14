@@ -11,8 +11,9 @@
     python -I label_batches.py kappa  --out <묶음 폴더>
     python -I label_batches.py gold-pick   --out <dev-cmp 묶음 폴더> [<묶음 폴더> …] --set <dev-cmp.jsonl> [--dest <폴더>]
     python -I label_batches.py gold-score  --out <dev-cmp 묶음 폴더> [<묶음 폴더> …] --gold <gold 묶음 폴더> [--cands <gold-cands.jsonl>]
+    python -I label_batches.py gold-score  --dev-from <gold-cands.jsonl> --gold <gold 묶음 폴더>        # dev 칸이 묶음 폴더 밖에서 정해진 쌍
     python -I label_batches.py review-todo --out <묶음 폴더> [<묶음 폴더> …] --set <쌍.jsonl> --dest ~/.judgemodel/sets/g1
-    python -I label_batches.py assemble --set <셋> --dirs <묶음 폴더> [<묶음 폴더> …] --dest ~/.judgemodel/sets/g1
+    python -I label_batches.py assemble --set <셋> --dirs <묶음 폴더> [<묶음 폴더> …] --dest ~/.judgemodel/sets/g1 [--allow-mixed-guide]
 """
 import argparse
 import collections
@@ -735,8 +736,16 @@ def gold_why(gold_dir, cands=""):
     return {}
 
 
+def dev_from_cands(path):
+    """gold-cands.jsonl 의 dev_label 칸을 dev 라벨로 쓴다 — dev 칸이 묶음 폴더 decided.jsonl 밖에서
+    정해진 쌍(g3 ko b : 위키 · BoolQ · KLUE 판정 파일)을 잴 때. 합의 여부는 몰라 status 는 비운다."""
+    return [{"id": r["id"], "label": r.get("dev_label"), "status": ""} for r in read_jsonl(path)]
+
+
 def cmd_gold_score(a):
-    dev, _ = load_dev_dirs(a.out)
+    if bool(a.out) == bool(a.dev_from):
+        sys.exit("--out (dev 묶음 폴더) 과 --dev-from (gold-cands.jsonl) 중 하나만 준다")
+    dev = dev_from_cands(a.dev_from) if a.dev_from else load_dev_dirs(a.out)[0]
     res = gold_agreement(dev, read_jsonl(os.path.join(a.gold, "decided.jsonl")), gold_why(a.gold, a.cands))
     print(json.dumps(res, ensure_ascii=False))
     if res.get("n") and not res["pass"]:
@@ -769,7 +778,7 @@ def review_rows(decided, votes_by_q, mode, gold_by_id, split_sample, seed):
 
 REVIEW_README = """human-review-todo.jsonl — 사람이 나중에 볼 라벨 목록 (JudgeModel 설계 d자료층재구축 2-4 ④ · 3-3)
 
-줄마다 쌍 하나다. 칸 : a 지지 · b 반대 · c 무관 · d 비슷한 계열 (기준 Docs/Guide/라벨기준support-v5.md).
+줄마다 쌍 하나다. 칸 : a 지지 · b 반대 · c 무관 · d 비슷한 계열 (기준 Docs/Guide/라벨기준support-vN.md — 줄의 label_guide 판).
 - id · set : 원래 쌍 id 와 어느 셋에서 왔나
 - evidence · claim : 근거 · 주장
 - votes : 판정자 j1 · j2 · j3 의 칸 / reasons : 판정자의 Q1 | Q2 | Q3 답과 까닭
@@ -828,7 +837,14 @@ TRAIN_SOURCE_KEYS = ("origin", "src", "lic", "synth_from", "grid")
 JUDGE_KEYS = tuple(f"j{i}" for i in range(1, JUDGE_MAX + 1))
 OLD_WANT_LETTER = {"support": "a", "contradict": "b", "unrelated": "c", "related": "d",
                    "a": "a", "b": "b", "c": "c", "d": "d", "cd": "cd"}
-LABEL_GUIDE = "support-v5"
+LABEL_GUIDE = "support-v5"   # 판의 기준 문서 이름에서 판을 못 뽑을 때 쓰는 기본 (옛 판 manifest 에는 guide 가 없다)
+GUIDE_VERSION = re.compile(r"support-v\d+")
+
+
+def guide_label(guide_path):
+    """기준 문서 경로 → 줄에 적을 label_guide 값. 파일 이름의 support-vN 을 쓰고, 없으면 LABEL_GUIDE."""
+    found = GUIDE_VERSION.search(os.path.basename(guide_path or ""))
+    return found.group(0) if found else LABEL_GUIDE
 
 
 class AssembleStop(Exception):
@@ -856,14 +872,14 @@ def trap_keys(out_dir, man):
     return qs, ids, texts
 
 
-def set_row(cand, dec, set_name, mode="eval"):
+def set_row(cand, dec, set_name, mode="eval", label_guide=LABEL_GUIDE):
     """후보 줄 + 합의 줄 → 셋 줄 (q 는 뺀다, want 는 칸 글자).
 
     train 이면 원천 칸(TRAIN_SOURCE_KEYS 중 있는 것)을 더 남긴다. eval 줄 꼴은 그대로다 (얼린 셋 바이트를 안 바꾸려고).
     줄 꼴은 train/data_prep.normalize 가 읽는 mem 쌍 꼴(evidence · claim · want)이다.
     """
     row = {"id": cand["id"], "evidence": cand["evidence"], "claim": cand["claim"], "want": dec["label"],
-           "label_guide": LABEL_GUIDE}
+           "label_guide": label_guide}
     for key in ("domain", "group", "groups", "lang", "form", "hint"):
         row[key] = cand.get(key, "")
     if cand.get("source"):
@@ -924,7 +940,7 @@ def collect_dir(out_dir, set_name, mode="eval"):
         if text_key(cand) in trap_text:
             traps_hit += 1
             continue
-        rows.append(set_row(cand, dec, set_name, mode))
+        rows.append(set_row(cand, dec, set_name, mode, guide_label(man.get("guide"))))
     votes_path = os.path.join(out_dir, "votes.jsonl")
     kap = kappas(read_jsonl(votes_path)) if os.path.exists(votes_path) else {}
     report_path = os.path.join(out_dir, "merge-report.json")
@@ -962,11 +978,12 @@ def dedupe_same(rows):
     return out, dropped
 
 
-def assemble(dirs, set_name, dedupe=False, mode="eval"):
+def assemble(dirs, set_name, dedupe=False, mode="eval", allow_mixed_guide=False):
     """묶음 폴더들 → (id 차례로 정렬한 셋 줄, 요약). 폴더 사이 (근거, 주장) · id 겹침이 있으면 AssembleStop.
 
     dedupe 이면 한 폴더 안의 같은 글 · 같은 칸 겹침만 하나로 줄인다 (폴더 사이 겹침은 늘 멈춤).
     mode 는 eval(평가 셋, cd 멈춤) · train(학습 셋, cd 넣음) — collect_dir 참고.
+    라벨 기준이 섞이면 멈춘다. allow_mixed_guide 면 줄마다 제 기준을 두고 요약 label_guide 를 "mixed" 로 적는다.
     """
     if mode not in ASSEMBLE_MODES:
         raise ValueError(f"mode 는 {ASSEMBLE_MODES} 중 하나다: {mode!r}")
@@ -987,12 +1004,21 @@ def assemble(dirs, set_name, dedupe=False, mode="eval"):
     dup_id = sum(n - 1 for n in by_id.values() if n > 1)
     if overlap or dup_id:
         raise AssembleStop(f"{set_name} : 같은 (근거, 주장) {overlap} · 같은 id {dup_id}")
+    guides = sorted({r["label_guide"] for r in rows})
+    if len(guides) > 1 and not allow_mixed_guide:
+        raise AssembleStop(f"{set_name} : 폴더마다 라벨 기준이 다르다 {guides} — 섞어 쓰려면 --allow-mixed-guide")
+    guide = LABEL_GUIDE
+    if len(guides) == 1:
+        guide = guides[0]
+    elif guides:
+        guide = "mixed"
     rows.sort(key=lambda r: r["id"])
     by_domain = collections.defaultdict(collections.Counter)
     for r in rows:
         by_domain[r["domain"]][r["want"]] += 1
     summary = {
-        "set": set_name, "pairs": len(rows), "label_guide": LABEL_GUIDE,
+        "set": set_name, "pairs": len(rows), "label_guide": guide,
+        "label_guides": dict(sorted(collections.Counter(r["label_guide"] for r in rows).items())),
         "want": dict(sorted(collections.Counter(r["want"] for r in rows).items())),
         "domain": {d: sum(c.values()) for d, c in sorted(by_domain.items())},
         "domain_want": {d: dict(sorted(c.items())) for d, c in sorted(by_domain.items())},
@@ -1010,7 +1036,7 @@ def cmd_assemble(a):
     if inside_git(a.dest) and not a.allow_git:
         sys.exit("--dest 가 git 안이다 — 셋 본문은 git 밖(~/.judgemodel/sets/g1)에 둔다")
     try:
-        rows, summary = assemble(a.dirs, a.set, a.dedupe_same, a.mode)
+        rows, summary = assemble(a.dirs, a.set, a.dedupe_same, a.mode, a.allow_mixed_guide)
     except AssembleStop as e:
         print(f"멈춤 : {e}", file=sys.stderr)
         sys.exit(2)
@@ -1019,7 +1045,8 @@ def cmd_assemble(a):
     with open(path, "rb") as f:
         summary["sha256"] = hashlib.sha256(f.read()).hexdigest()
     write_json(os.path.join(a.dest, f"{a.set}.summary.json"), summary)
-    keys = ("set", "pairs", "want", "domain", "status", "relabel", "overlap", "dropped_empty", "sha256")
+    keys = ("set", "pairs", "label_guides", "want", "domain", "status", "relabel", "overlap", "dropped_empty",
+            "sha256")
     if a.mode == "train":
         keys = ("mode",) + keys + ("cd", "deduped")
     print(json.dumps({k: summary[k] for k in keys}, ensure_ascii=False))
@@ -1085,7 +1112,8 @@ def main(argv=None):
     s.set_defaults(func=cmd_gold_pick)
 
     s = sub.add_parser("gold-score")
-    s.add_argument("--out", nargs="+", required=True, help="dev 묶음 폴더 (공개판 · 아카이브판)")
+    s.add_argument("--out", nargs="*", default=[], help="dev 묶음 폴더 (공개판 · 아카이브판)")
+    s.add_argument("--dev-from", default="", help="dev 라벨을 이 gold-cands.jsonl 의 dev_label 칸에서 읽는다 (--out 대신)")
     s.add_argument("--gold", required=True)
     s.add_argument("--cands", default="", help="gold-cands.jsonl (기본 : --gold 폴더, 없으면 그 위 폴더)")
     s.set_defaults(func=cmd_gold_score)
@@ -1111,6 +1139,8 @@ def main(argv=None):
     s.add_argument("--dedupe-same", action="store_true",
                    help="한 폴더 안 같은 글 · 같은 칸 겹침은 id 작은 줄만 남긴다 (기본은 멈춤)")
     s.add_argument("--allow-git", action="store_true", help="시험용 — git 안에 써도 된다")
+    s.add_argument("--allow-mixed-guide", action="store_true",
+                   help="폴더마다 라벨 기준(support-vN)이 달라도 잇는다 — 줄마다 label_guide · summary 에 기준별 수 (기본은 멈춤)")
     s.set_defaults(func=cmd_assemble)
 
     a = p.parse_args(argv)

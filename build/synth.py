@@ -274,7 +274,7 @@ def read_answers(answer_dir):
     return got, dup, bad
 
 
-def collect(seeds, answers, dup):
+def collect(seeds, answers, dup, label_guide=None):
     """씨앗 + 답 → (후보 쌍 줄, 셈). 어긋난 씨앗은 네 칸을 통째로 버린다."""
     rows, count = [], collections.Counter()
     for seed in seeds:
@@ -289,7 +289,8 @@ def collect(seeds, answers, dup):
             rows.append({"id": f"syn-{sid}-{cell}", "evidence": norm_text(cells[cell]), "claim": seed["claim"],
                          "want": "", "hint": cell, "origin": "synth", "src": seed.get("origin", ""),
                          "synth_from": seed["id"], "grid": seed["grid"], "lang": seed.get("lang", ""),
-                         "label_guide": lb.LABEL_GUIDE, "domain": seed.get("domain", ""), "form": "synth",
+                         "label_guide": label_guide or lb.LABEL_GUIDE, "domain": seed.get("domain", ""),
+                         "form": "synth",
                          "group": seed.get("group", ""), "groups": seed.get("groups") or [],
                          "lic": seed.get("lic", "")})
     count["pairs"] = len(rows)
@@ -304,7 +305,7 @@ def cmd_collect(a):
     seeds = lb.read_jsonl(man["seeds"])
     answers, dup, bad = read_answers(os.path.join(a.out, "answers"))
     known = {s["seed_id"] for s in seeds}
-    rows, count = collect(seeds, answers, dup)
+    rows, count = collect(seeds, answers, dup, lb.guide_label(man.get("guide")))
     lb.write_jsonl(a.dest, rows)
     report = {"seeds": len(seeds), **dict(count), "bad_lines": bad,
               "unknown_seed": len(set(answers) - known), "out": a.dest}

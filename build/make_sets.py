@@ -9,9 +9,14 @@
     python -I make_sets.py check   --build <build>/g1 --cands <build>/g1/train-cands.jsonl --old-root ~/.judgemodel
     python -I make_sets.py attach-rewrite --cands <train-cands> --rewrite <rewrite-train-*.jsonl> --out <klue 줄>
     python -I make_sets.py pool --archive --build <build>/g1      # 아카이브 · mem 학습 후보 (소단계 48)
+    python -I make_sets.py reserve-g2 --build <build>/g2           # v1.2 B 판 b 자 예약 · 학습 층
+    python -I make_sets.py check-g2   --build <build>/g2
+    python -I make_sets.py reserve-g3 --build <build>/g3           # v1.2 K 판 g3 평가 셋 새 쌍 예약 · 학습 층
 """
 import argparse
 import collections
+import glob
+import hashlib
 import json
 import math
 import os
@@ -73,6 +78,12 @@ def pair_key(row):
     claim = row.get("claim") or row.get("hypothesis") or row.get("question") or ""
     evidence = row.get("evidence") or row.get("premise") or ""
     return norm(evidence), norm(claim)
+
+
+def text_keys(row):
+    """(근거, 주장) 정규형 열쇠 양쪽 차례. evidence · claim 칸만 본다."""
+    ev, cl = norm(row.get("evidence")), norm(row.get("claim"))
+    return {(ev, cl), (cl, ev)}
 
 
 def read_jsonl(path):
@@ -1257,6 +1268,844 @@ def attach_rewrite_main(args):
     return 0
 
 
+# ---------------------------------------------------------------- reserve-g2 · check-g2 (v1.2 B 판 b 자, 설계 v1.2-B판 3-1 · 5-1 · 7절)
+#
+# b 후보만 다룬다. 평가 몫(dev-cmp-g2 · dev-cal-g2 · blind-g2)을 묶음째 먼저 예약하고, 남은 묶음을 학습 층에 준다.
+# 원천 몫(b 목표)을 남김률로 나눠 후보 수를 정한다. 한국어 · KLUE 가 모자라면 그 셋의 VitaminC 몫으로 한 번 넘긴다(shift).
+
+G2_SETS = ("dev-cmp-g2", "dev-cal-g2", "blind-g2")      # 차례 : 관문에 쓰는 dev-cmp 먼저
+G2_B_TARGET = {"dev-cmp-g2": {"ko": 60, "klue": 20, "vitaminc": 100},
+               "dev-cal-g2": {"ko": 15, "klue": 5, "vitaminc": 25},
+               "blind-g2": {"ko": 85, "klue": 35, "vitaminc": 130}}
+G2_DOMAIN_SOURCES = {"ko": ("ko-supersede", "ko-revision"), "klue": ("klue",), "vitaminc": ("vitaminc-heldout",)}
+G2_KEEP = {"ko-supersede": 0.30, "ko-revision": 0.16, "klue": 0.22, "vitaminc-heldout": 0.52}
+G2_FLOOR = 1.6                   # 후보는 b 목표의 1.6배 이상
+G2_GROUP_CAP = {"ko-supersede": 4, "ko-revision": 12, "klue": 3, "vitaminc-heldout": 4}   # 한국어 고침은 문서가 적어 넉넉히
+G2_TRAIN_SOURCES = ("vitaminc-train", "ko-revision", "ko-supersede")
+G2_SEED = 20261201
+G1_SET_FILES = ("dev-cal", "dev-cmp", "blind-g1", "ood-g1")
+G1_TRAIN_FILES = ("train-g1-II", "train-g1-arch", "train-g1-syn")
+
+
+def _strip_tags():
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "train"))
+    from data_prep import strip_tags
+    return strip_tags
+
+
+def use1_key(row, strip_tags):
+    """use1 쌍 열쇠 (protocol-use1 `pair_key` 와 같은 셈)."""
+    text = strip_tags(row.get("evidence") or "") + "\x1f" + strip_tags(row.get("claim") or "")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _file_keys_ids_groups(paths):
+    keys, ids, groups = set(), set(), set()
+    for path in paths:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                ids.update(_MEM_ID.findall(line))
+                row = json.loads(line)
+                _walk_pairs(row, keys, ids)
+                groups.update(row.get("groups") or ([row["group"]] if row.get("group") else []))
+    return keys, ids, groups
+
+
+class G2Forbid:
+    """g2 후보가 피해야 할 것 — 옛 셋 글 · 기억 id · 묶음 · use1 얼린 쌍 · 잣대 기억."""
+
+    def __init__(self, old_root, g1_build, use1_root, ruler_ids_path):
+        self.missing = []
+        old_keys, old_ids, self.missing = load_old(old_root)
+        sets_dir = os.path.join(old_root, "sets", "g1")
+        g1_eval = [os.path.join(sets_dir, n + ".jsonl") for n in G1_SET_FILES]
+        g1_train = [os.path.join(sets_dir, n + ".jsonl") for n in G1_TRAIN_FILES]
+        for path in g1_eval + g1_train:
+            if not os.path.exists(path):
+                self.missing.append(os.path.basename(path))
+        g1_eval = [p for p in g1_eval if os.path.exists(p)]
+        g1_train = [p for p in g1_train if os.path.exists(p)]
+        ek, ei, eg = _file_keys_ids_groups(g1_eval)
+        tk, ti, tg = _file_keys_ids_groups(g1_train)
+        self.text = old_keys | ek | tk                       # 어느 몫이든 옛 셋과 같은 (근거, 주장) 금지
+        self.eval_ids = old_ids | ei | ti                    # 평가 몫 : 옛 셋 어디에든 쓴 기억 금지
+        self.train_ids = old_ids | ei | ti                   # 학습 층도 옛 셋 어디에든 쓴 기억 금지 (check 의 mem_id_old 0)
+        # g1 예약(reserve · reserve-archive)은 쓰지 않은 묶음까지 넓게 잡혀 있어(문서 묶음 거의 전부) 실제로 셋에 든 묶음만 막는다
+        # — g1 아카이브 학습 후보의 --reserve-used-only 와 같은 생각이다.
+        # 옛 학습과는 묶음(문서) 대신 문장으로 가른다 : 한국어 문서 거의 모두가 train-g1-arch 묶음이라 문서로 막으면
+        # 한국어 평가 b 가 0 이 된다. 대신 평가 줄의 근거 · 주장 어느 한쪽이라도 옛 셋 문장과 같으면 뺀다(side_old).
+        self.eval_groups = eg                                # 평가 몫 : g1 평가 셋에 든 묶음 금지
+        self.train_groups = eg                               # 학습 층 : g1 평가 셋에 든 묶음 금지
+        self.sides = {side for key in self.text for side in key if side}
+        self.ruler_ids = set()
+        if ruler_ids_path and os.path.exists(ruler_ids_path):
+            with open(ruler_ids_path, encoding="utf-8") as f:
+                self.ruler_ids = set(_MEM_ID.findall(f.read()))
+        elif ruler_ids_path:
+            self.missing.append(os.path.basename(ruler_ids_path))
+        self.strip_tags = _strip_tags()
+        self.use1_keys, self.use1_texts = set(), set()
+        exclude = os.path.join(use1_root, "EXCLUDE.sha256list")
+        if os.path.exists(exclude):
+            with open(exclude, encoding="utf-8") as f:
+                self.use1_keys = {line.strip() for line in f if line.strip()}
+        else:
+            self.missing.append("EXCLUDE.sha256list")
+        for path in sorted(glob.glob(os.path.join(use1_root, "*", "set-use1*.jsonl"))):
+            for row in read_jsonl(path):
+                for side in ("evidence", "claim"):
+                    self.use1_texts.add(norm(self.strip_tags(row.get(side) or "")))
+        self.use1_texts.discard("")
+        self.g1_klue_used = set()
+        for path in glob.glob(os.path.join(g1_build, "klue-mrc", "rewrite-*.jsonl")):
+            self.g1_klue_used.update(r.get("id") for r in read_jsonl(path))
+
+    def reasons(self, row, role):
+        """이 줄이 role(eval · train) 몫에 못 드는 까닭 목록 (빈 목록이면 됨)."""
+        out = []
+        key = pair_key(row)
+        if key in self.text:
+            out.append("text_old")
+        elif role == "eval" and {norm(row.get("evidence")), norm(row.get("claim"))} & self.sides:
+            out.append("side_old")
+        ids = set(_MEM_ID.findall(json.dumps(row.get("src_ids", []))))
+        if ids & self.ruler_ids:
+            out.append("ruler_mem")
+        if ids & (self.eval_ids if role == "eval" else self.train_ids):
+            out.append("mem_id_old")
+        if set(row.get("groups") or [row.get("group")]) & (self.eval_groups if role == "eval" else self.train_groups):
+            out.append("group_g1")
+        if use1_key(row, self.strip_tags) in self.use1_keys:
+            out.append("use1_pair")
+        sides = {norm(self.strip_tags(row.get("evidence") or "")), norm(self.strip_tags(row.get("claim") or ""))}
+        if sides & self.use1_texts:
+            out.append("use1_text")
+        return out
+
+
+def _g2_eval_ok(source, row):
+    if source == "klue":
+        return row.get("form") == "unanswerable" and row.get("split") == "heldout"
+    return row.get("hint") == "b" or source.startswith("ko-")
+
+
+def _both_keys(row):
+    """(근거, 주장) 열쇠 양쪽 차례 — 출처 id(글)와 안 섞이게 튜플로 둔다."""
+    key = pair_key(row)
+    return {key, (key[1], key[0])}
+
+
+def _reserve_domain(doc, domain, targets, keep, shift, orders, by_group, owner, owner_src):
+    """한 도메인의 b 몫을 셋 셋에 묶음째 나눈다. 차례마다 채움률(기대 b / 목표)이 가장 낮은 셋이 다음 묶음을 가져간다 —
+    원천이 모자라도 셋 사이 비율이 목표 비율대로 남는다. 모자란 b 는 같은 셋의 VitaminC 몫으로 넘긴다(shift)."""
+    target = {s: targets[s][domain] + (shift[s] if domain == "vitaminc" else 0) for s in G2_SETS}
+    covered = {s: 0.0 for s in G2_SETS}
+    count = collections.Counter()
+    for set_name in G2_SETS:
+        for source in G2_DOMAIN_SOURCES[domain]:
+            doc["sets"].setdefault(set_name, {})[source] = {"groups": [], "row_ids": [], "candidates": 0, "b_expected": 0.0}
+
+    def hungry():
+        open_sets = [s for s in G2_SETS if target[s] and (covered[s] < target[s] or count[s] < G2_FLOOR * target[s])]
+        return min(open_sets, key=lambda s: (covered[s] / target[s], G2_SETS.index(s))) if open_sets else None
+
+    for source in G2_DOMAIN_SOURCES[domain]:
+        for gid in orders[source]:
+            set_name = hungry()
+            if set_name is None:
+                break
+            if gid in owner:
+                continue
+            rows = [r for r in by_group[source][gid] if not set(r["groups"]) & set(owner)
+                    and not set(r.get("src_ids", [])) & set(owner_src) and _both_keys(r).isdisjoint(owner_src)]
+            rows = rows[:G2_GROUP_CAP[source]]
+            if not rows:
+                continue
+            for g in {g for r in rows for g in r["groups"]} | {gid}:
+                owner[g] = set_name
+            owner_src.update({src: set_name for r in rows for src in r.get("src_ids", [])})
+            owner_src.update({key: set_name for r in rows for key in _both_keys(r)})
+            entry = doc["sets"][set_name][source]
+            entry["groups"].append(gid)
+            entry["row_ids"].extend(r["id"] for r in rows)
+            entry["candidates"] = len(entry["row_ids"])
+            entry["b_expected"] = round(entry["b_expected"] + keep[source] * len(rows), 1)
+            covered[set_name] += keep[source] * len(rows)
+            count[set_name] += len(rows)
+    for set_name in G2_SETS:
+        short = max(0, math.ceil(target[set_name] - covered[set_name] - 1e-9))
+        if domain != "vitaminc" and short:
+            shift[set_name] += short
+            doc["shift"].setdefault(set_name, {})[domain] = short
+        doc["sets"][set_name].setdefault("domains", {})[domain] = {
+            "b_target": target[set_name], "b_expected": round(covered[set_name], 1), "candidates": count[set_name],
+            "short": short if domain == "vitaminc" else 0}
+
+
+def reserve_g2(build, forbid, seed=G2_SEED, targets=None, keep=None):
+    """평가 몫 b 후보를 묶음째 예약하고 남은 묶음을 학습 층으로 → (예약 문서, 셋별 줄, 학습 층 줄)."""
+    targets = targets or G2_B_TARGET
+    keep = keep or G2_KEEP
+    rng = random.Random(seed)
+    loaded = {}
+    for source in set(G2_KEEP) | set(G2_TRAIN_SOURCES):
+        rows, groups = load_source(build, source)
+        loaded[source] = (rows or [], groups or {})
+    train_pages = set(loaded["vitaminc-train"][1])
+    doc = {"seed": seed, "keep": keep, "targets": targets, "floor": G2_FLOOR, "sets": {}, "shift": {},
+           "dropped_eval": {}, "dropped_train": {}, "missing": list(forbid.missing)}
+    owner, owner_src = {}, {}             # 묶음 · 출처 id(커밋 · 기억 · 판 고침) → 가져간 셋
+    orders = {}
+    by_group = {}
+    for source in G2_KEEP:
+        rows, groups = loaded[source]
+        dropped = collections.Counter()
+        good = collections.defaultdict(list)
+        for row in rows:
+            if not _g2_eval_ok(source, row):
+                continue
+            why = forbid.reasons(row, "eval")
+            if source == "klue" and row["id"] in forbid.g1_klue_used:
+                why.append("klue_g1_rewrite")
+            if source == "vitaminc-heldout" and set(row["groups"]) & train_pages:
+                why.append("page_in_train")
+            if why:
+                dropped.update(why)
+                continue
+            good[row["group"]].append(row)
+        doc["dropped_eval"][source] = dict(dropped)
+        order = sorted(good)
+        rng.shuffle(order)
+        if source == "ko-revision":
+            order.sort(key=lambda g: -sum(1 for r in good[g] if r.get("num_change")))
+        for gid in order:
+            good[gid].sort(key=lambda r: (not r.get("num_change"), r["id"]))
+        orders[source], by_group[source] = order, good
+    shift = collections.Counter()
+    for domain in ("ko", "klue", "vitaminc"):
+        _reserve_domain(doc, domain, targets, keep, shift, orders, by_group, owner, owner_src)
+    eval_rows = {s: [] for s in G2_SETS}
+    for source in G2_KEEP:
+        rows = {r["id"]: r for r in loaded[source][0]}
+        for set_name in G2_SETS:
+            for rid in doc["sets"][set_name][source]["row_ids"]:
+                eval_rows[set_name].append(dict(rows[rid], set=set_name, g2_source=source))
+    train_rows, dropped_pairs = [], set()
+    owned, owned_src = set(owner), set(owner_src)
+    for source in G2_TRAIN_SOURCES:
+        dropped = collections.Counter()
+        kept = []
+        for row in loaded[source][0]:
+            why = forbid.reasons(row, "train")
+            if set(row["groups"]) & owned:
+                why.append("group_eval_g2")
+            if set(row.get("src_ids", [])) & owned_src:
+                why.append("src_eval_g2")
+            if pair_key(row) in owned_src:
+                why.append("text_eval_g2")
+            if why:
+                dropped.update(why)
+                if row.get("pair"):
+                    dropped_pairs.add(row["pair"])
+                continue
+            kept.append(dict(row, g2_source=source))
+        if source == "vitaminc-train":
+            before = len(kept)
+            kept = [r for r in kept if r.get("pair") not in dropped_pairs]
+            dropped["pair_partner"] += before - len(kept)
+        doc["dropped_train"][source] = dict(dropped)
+        train_rows.extend(kept)
+    doc["train"] = {s: {"rows": sum(1 for r in train_rows if r["g2_source"] == s),
+                        "b_hint": sum(1 for r in train_rows if r["g2_source"] == s and r["hint"] == "b"),
+                        "groups": len({r["group"] for r in train_rows if r["g2_source"] == s})}
+                    for s in G2_TRAIN_SOURCES}
+    doc["reserved"] = sorted(owner)
+    return doc, eval_rows, train_rows
+
+
+def check_g2(eval_rows, train_rows, forbid):
+    """평가 셋 사이 · 평가 × 학습 층 · 둘 × 옛 셋(글 · 기억 id · 묶음 · use1 · 잣대) 겹침 수. 0 이어야 한다."""
+    counts = collections.Counter()
+    seen_group, seen_key, seen_src = {}, {}, {}
+    for set_name, rows in eval_rows.items():
+        for row in rows:
+            key = pair_key(row)
+            for gid in row["groups"]:
+                if seen_group.setdefault(gid, set_name) != set_name:
+                    counts["eval_group_across_sets"] += 1
+            if seen_key.setdefault(key, set_name) != set_name or seen_key.setdefault((key[1], key[0]), set_name) != set_name:
+                counts["eval_text_across_sets"] += 1
+            for src in row.get("src_ids", []):
+                if seen_src.setdefault(src, set_name) != set_name:
+                    counts["eval_src_across_sets"] += 1
+            for why in forbid.reasons(row, "eval"):
+                counts["eval_" + why] += 1
+    for row in train_rows:
+        key = pair_key(row)
+        if set(row["groups"]) & set(seen_group):
+            counts["train_group_eval"] += 1
+        if key in seen_key or (key[1], key[0]) in seen_key:
+            counts["train_text_eval"] += 1
+        if set(row.get("src_ids", [])) & set(seen_src):
+            counts["train_src_eval"] += 1
+        for why in forbid.reasons(row, "train"):
+            counts["train_" + why] += 1
+    names = ["eval_group_across_sets", "eval_text_across_sets", "eval_src_across_sets", "train_group_eval",
+             "train_text_eval", "train_src_eval"]
+    names += [f"{role}_{why}" for role in ("eval", "train")
+              for why in ("text_old", "side_old", "mem_id_old", "ruler_mem", "group_g1", "use1_pair", "use1_text")]
+    return {k: counts.get(k, 0) for k in names}
+
+
+def _g2_forbid(args):
+    root = args.old_root or os.path.join(os.path.expanduser("~"), ".judgemodel")
+    return G2Forbid(root, args.g1_build or os.path.join(root, "build", "g1"),
+                    args.use1 or os.path.join(root, "measure", "use1"),
+                    args.ruler_ids or os.path.join(args.build, "forbid-ruler-ids.txt"))
+
+
+def _write_jsonl(path, rows):
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def reserve_g2_main(args):
+    forbid = _g2_forbid(args)
+    if forbid.missing:
+        print(json.dumps({"missing": forbid.missing}, ensure_ascii=False))
+        return 2
+    doc, eval_rows, train_rows = reserve_g2(args.build, forbid, args.seed)
+    out = os.path.join(args.build, "reserve")
+    os.makedirs(out, exist_ok=True)
+    for set_name, rows in eval_rows.items():
+        _write_jsonl(os.path.join(out, f"{set_name}-b-cands.jsonl"), rows)
+    _write_jsonl(os.path.join(out, "train-layer-cands.jsonl"), train_rows)
+    doc["check"] = check_g2(eval_rows, train_rows, forbid)
+    with open(os.path.join(out, "reserve-g2.json"), "w", encoding="utf-8", newline="\n") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=1)
+    brief = {s: per["domains"] for s, per in doc["sets"].items()}
+    print(json.dumps({"sets": brief, "shift": doc["shift"], "train": doc["train"], "check": doc["check"]},
+                     ensure_ascii=False, indent=1))
+    return 1 if sum(doc["check"].values()) else 0
+
+
+def check_g2_main(args):
+    forbid = _g2_forbid(args)
+    out = os.path.join(args.build, "reserve")
+    eval_rows = {s: read_jsonl(os.path.join(out, f"{s}-b-cands.jsonl")) for s in G2_SETS}
+    train_path = os.path.join(out, "train-layer-cands.jsonl")
+    if args.train:
+        train_path = args.train
+    train_rows = read_jsonl(train_path)
+    result = check_g2(eval_rows, train_rows, forbid)
+    result["eval_rows"] = {s: len(r) for s, r in eval_rows.items()}
+    result["train_rows"] = len(train_rows)
+    result["old_missing"] = forbid.missing
+    result["old_pairs"] = len(forbid.text) // 2
+    result["use1_keys"] = len(forbid.use1_keys)
+    result["ruler_ids"] = len(forbid.ruler_ids)
+    print(json.dumps(result, ensure_ascii=False, indent=1))
+    bad = sum(v for k, v in result.items() if isinstance(v, int) and k.startswith(("eval_", "train_"))
+              and k not in ("train_rows",))
+    return 1 if bad or forbid.missing else 0
+
+
+# ---------------------------------------------------------------- reserve-g3 (v1.2 K 판 평가 몫 예약, 설계 v1.2-한국어b보강판 2-3 · 3-1 · 4절 · 흐름 6)
+#
+# 라벨이 이미 확정된 원천(위키 · MIT · BoolQ · KLUE 판정 파일)과 VitaminC heldout 영어 후보에서 g3 셋 셋의 「새로 더할 쌍」을
+# 묶음째 예약한다. g3 = g2 + 새 쌍이라 g2 셋 쌍을 이어 붙이는 건 다음 단계다. 원천 몫은 b 수로 센다(확정 원천 남김률 1.0,
+# VitaminC 는 g2 남김률 .52). 모자란 b 는 G3_SHIFT 차례로 다음 원천의 같은 셋에 넘긴다. 없는 입력 파일은 몫 0 으로 보고한다.
+
+G3_SETS = ("dev-cmp-g3", "dev-cal-g3", "blind-g3")      # 차례 : 관문에 쓰는 dev-cmp 먼저
+G3_B_TARGET = {"dev-cmp-g3": {"mit": 30, "wiki": 80, "klue": 20, "boolq": 70},
+               "dev-cal-g3": {"mit": 5, "wiki": 20, "klue": 10, "boolq": 15},
+               "blind-g3": {"mit": 35, "wiki": 90, "klue": 35, "boolq": 90, "vitaminc": 150}}
+G3_ORDER = ("mit", "wiki", "klue", "boolq", "vitaminc")   # 예약 차례 = 넘김 차례 (앞 원천의 예약은 뒤 원천 파일이 생겨도 그대로)
+G3_SHIFT = {"mit": "wiki", "wiki": "boolq", "klue": "boolq"}   # 모자란 b 를 받는 원천 (설계 흐름 「원천 몫 넘김」)
+G3_PRIORITY = ("mit",)                     # 양이 적어 채움률 대신 셋 차례대로 채운다 (dev-cmp-g3 먼저)
+G3_REST_TO_EVAL = ("wiki", "klue", "boolq")   # 평가 몫으로 떼어 둔 파일 — b 없는 묶음(a · c · d)도 셋에 고르게 준다
+G3_INPUTS = {"mit": "mit/judged.jsonl", "wiki": "kowiki/wiki-labeled-eval.jsonl",
+             "klue": "klue/judged-eval.jsonl", "boolq": "boolq/judged-eval.jsonl"}
+G3_TRAIN_INPUTS = {"wiki-train": "kowiki/wiki-labeled-train.jsonl"}
+G3_KEEP = {"vitaminc": 0.52}               # 라벨 안 된 원천만. 나머지는 1.0
+G3_FLOOR = 1.6                             # 라벨 안 된 원천은 후보를 b 목표의 1.6배 이상
+G3_GROUP_CAP = {"vitaminc": 4}
+G3_A_PER_B = {"mit": 1, "boolq": 1}       # b 묶음 안 a 는 b 수만큼만 (MIT 는 a 가 몰려 있다). 남은 줄은 버린다(묶음째 규칙)
+G3_OWN_RNG = ("klue", "boolq")             # 따로 씨앗 — 이 둘의 파일이 뒤에 생겨도 VitaminC 차례(공용 씨앗)가 안 바뀐다
+G3_SEED = 20261301
+G3_PARA_SIM = 0.8                          # 문장 글자 3묶음 닮음 (설계 3-1)
+G3_PARA_MIN = 15                           # 이보다 짧은 문장은 겹침 검사에서 뺀다
+G2_SET_FILES = ("dev-cmp-g2", "dev-cal-g2", "blind-g2", "train-g2-b")
+_OLD_EVAL_FILES = (("g1", "dev-cal"), ("g1", "dev-cmp"), ("g1", "blind-g1"),
+                   ("g2", "dev-cmp-g2"), ("g2", "dev-cal-g2"), ("g2", "blind-g2"))
+_SENT_SPLIT = re.compile(r"(?<=[.!?。])\s+|\n+")
+_COMMIT = re.compile(r"^([^:]+):([0-9a-f]{12})(?::|$)")
+
+
+def judge_pick(judge):
+    """판정 결과의 확정 칸 : 사람이 되돌린 칸(override.to) → final → label 차례. 없으면 ""."""
+    if not isinstance(judge, dict):
+        return ""
+    override = judge.get("override")
+    if isinstance(override, dict) and override.get("to") in ("a", "b", "c", "d"):
+        return override["to"]
+    for name in ("final", "label"):
+        if judge.get(name) in ("a", "b", "c", "d"):
+            return judge[name]
+    return ""
+
+
+def g3_label(row):
+    """확정 칸 : 판정 결과(override · final · label) → label → want → hint 차례."""
+    picked = judge_pick(row.get("judge"))
+    if picked:
+        return picked
+    for name in ("label", "want", "hint"):
+        if row.get(name) in ("a", "b", "c", "d"):
+            return row[name]
+    return ""
+
+
+def sha_key(row):
+    """blind-g2.forbid.json 의 key_rule — sha256(evidence.strip() + '\\x1f' + claim.strip())."""
+    text = (row.get("evidence") or "").strip() + "\x1f" + (row.get("claim") or "").strip()
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _para_sentences(row):
+    """근거 문장 정규형 목록. 위키 근거 앞의 「제목 : 」은 뗀다."""
+    text = row.get("evidence") or row.get("premise") or ""
+    title = row.get("title")
+    if title and text.startswith(title + " : "):
+        text = text[len(title) + 3:]
+    out = []
+    for sent in _SENT_SPLIT.split(text):
+        sent = norm(sent)
+        if len(sent) >= G3_PARA_MIN:
+            out.append(sent)
+    return out
+
+
+class ParaIndex:
+    """문장 겹침 색인 — 정규화 일치 또는 글자 3묶음 Jaccard ≥ sim. 앞부분 거르기(prefix filter)로 후보만 맞춰 본다."""
+
+    def __init__(self, sim=G3_PARA_SIM):
+        self.sim = sim
+        self.grams, self.tags = [], []
+        self.post = collections.defaultdict(list)
+        self.exact = collections.defaultdict(set)
+
+    def _prefix(self, grams):
+        keep = len(grams) - math.ceil(self.sim * len(grams)) + 1
+        return sorted(grams)[:max(1, keep)]
+
+    @staticmethod
+    def _gram_set(sent):
+        return frozenset(sent[i:i + 3] for i in range(max(1, len(sent) - 2)))
+
+    def add(self, row, tag):
+        for sent in _para_sentences(row):
+            self.exact[sent].add(tag)
+            grams = self._gram_set(sent)
+            idx = len(self.grams)
+            self.grams.append(grams)
+            self.tags.append(tag)
+            for gram in self._prefix(grams):
+                self.post[gram].append(idx)
+
+    def hits(self, row):
+        """이 줄 근거와 겹치는 색인 줄의 꼬리표 모음."""
+        out = set()
+        for sent in _para_sentences(row):
+            out |= self.exact.get(sent, set())
+            grams = self._gram_set(sent)
+            seen = set()
+            for gram in self._prefix(grams):
+                for idx in self.post.get(gram, ()):
+                    if idx in seen or self.tags[idx] in out:
+                        continue
+                    seen.add(idx)
+                    other = self.grams[idx]
+                    if len(grams & other) >= self.sim * len(grams | other):
+                        out.add(self.tags[idx])
+        return out
+
+
+class G3Forbid(G2Forbid):
+    """g3 후보가 피해야 할 것 — G2Forbid(g1 · 옛 셋 · use1 · 잣대) + g2 셋 넷의 글 · 문장 · 기억 id · 묶음
+    + blind-g2.forbid.json + 씨앗 forbid-g3.txt(평가 몫만) + g2 예약 묶음(VitaminC 몫)."""
+
+    def __init__(self, old_root, g1_build, use1_root, ruler_ids_path, g2_build, seed_forbid_path):
+        super().__init__(old_root, g1_build, use1_root, ruler_ids_path)
+        g2_sets = [os.path.join(old_root, "sets", "g2", n + ".jsonl") for n in G2_SET_FILES]
+        for path in g2_sets:
+            if not os.path.exists(path):
+                self.missing.append(os.path.basename(path))
+        keys, ids, groups = _file_keys_ids_groups([p for p in g2_sets if os.path.exists(p)])
+        self.text |= keys
+        self.sides |= {side for key in keys for side in key if side}
+        self.eval_ids |= ids
+        self.train_ids |= ids
+        self.eval_groups = set(self.eval_groups) | groups
+        self.train_groups = set(self.train_groups) | groups
+        self.g2_json = {}
+        path = os.path.join(old_root, "sets", "g2", "blind-g2.forbid.json")
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                self.g2_json = {k: set(v) for k, v in json.load(f).items() if isinstance(v, list)}
+        else:
+            self.missing.append("blind-g2.forbid.json")
+        self.seed = collections.defaultdict(set)
+        if seed_forbid_path and os.path.exists(seed_forbid_path):
+            with open(seed_forbid_path, encoding="utf-8") as f:
+                for line in f:
+                    if line.strip() and not line.startswith("#") and "\t" in line:
+                        name, value = line.rstrip("\n").split("\t", 1)
+                        self.seed[name].add(value)
+        else:
+            self.missing.append(os.path.basename(seed_forbid_path or "forbid-g3.txt"))
+        self.g2_reserved, self.vitc_train_pages = set(), set()
+        path = os.path.join(g2_build, "reserve", "reserve-g2.json")
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                self.g2_reserved = set(json.load(f)["reserved"])
+        else:
+            self.missing.append("reserve-g2.json")
+        _, pages = load_source(g2_build, "vitaminc-train")
+        self.vitc_train_pages = set(pages or ())
+
+    @staticmethod
+    def _docs_commits(row):
+        docs = {g[4:] for g in row.get("groups") or [row.get("group")] if g and g.startswith("doc:")}
+        commits = set()
+        for src in row.get("src_ids") or []:
+            match = _COMMIT.match(src)
+            if match:
+                commits.add(f"{match.group(1)}:{match.group(2)}")
+            elif "/" in src or src.endswith(".md"):
+                docs.add(src)
+        return docs, commits
+
+    def reasons(self, row, role):
+        out = super().reasons(row, role)
+        groups = set(row.get("groups") or [row.get("group")])
+        srcs = set(row.get("src_ids") or [])
+        ids = set(_MEM_ID.findall(json.dumps(row.get("src_ids", []))))
+        docs, commits = self._docs_commits(row)
+        key = sha_key(row)
+        flip = sha_key({"evidence": row.get("claim"), "claim": row.get("evidence")})
+        j = self.g2_json
+        if (groups & j.get("groups", set()) or srcs & j.get("src_ids", set()) or {key, flip} & j.get("pair_keys", set())
+                or ids & j.get("mem_ids", set()) or docs & j.get("doc_paths", set()) or commits & j.get("commits", set())
+                or row.get("id") in j.get("cand_ids", set())):
+            out.append("blind_g2_forbid")
+        if role == "eval":
+            s = self.seed
+            if (groups & s["groups"] or docs & s["doc_paths"] or ids & s["mem_ids"] or {key, flip} & s["pair_keys"]):
+                out.append("seed_g3")
+            if groups & self.g2_reserved:
+                out.append("g2_reserved")
+            if row.get("lang") == "en" and groups & self.vitc_train_pages:
+                out.append("page_in_train")
+        return out
+
+
+def _old_eval_index(old_root):
+    """g1 · g2 평가 셋의 한국어 지문(KLUE 등) 문장 색인 — 위키 · BoolQ 문단 겹침을 뺄 때 쓴다."""
+    index = ParaIndex()
+    for gen, name in _OLD_EVAL_FILES:
+        path = os.path.join(old_root, "sets", gen, name + ".jsonl")
+        if os.path.exists(path):
+            for row in read_jsonl(path):
+                if row.get("lang") == "ko" or row.get("domain") in ("klue-mrc", "klue"):
+                    index.add(row, "old")
+    return index
+
+
+def _g3_eval_paragraphs(build):
+    """BoolQ · KLUE 평가 몫 원문(판정 전 후보) — 학습 층이 그 문단과 겹치면 뺀다. 없으면 빈 목록."""
+    rows = []
+    for rel in ("boolq/dev.jsonl", "boolq/test.jsonl"):
+        path = os.path.join(build, rel)
+        if os.path.exists(path):
+            rows.extend(read_jsonl(path))
+    path = os.path.join(build, "klue", "answered.jsonl")
+    if os.path.exists(path):
+        rows.extend(r for r in read_jsonl(path) if r.get("split") == "heldout")
+    return rows
+
+
+def _group_rows(source, rows):
+    """한 묶음에서 평가 셋에 넣을 줄 — b 와 c · d 는 다, a 는 G3_A_PER_B 만큼, VitaminC 는 앞 G3_GROUP_CAP 줄."""
+    rows = sorted(rows, key=lambda r: (g3_label(r) != "b", r["id"]))
+    if source in G3_GROUP_CAP:
+        return rows[:G3_GROUP_CAP[source]]
+    if source in G3_A_PER_B:
+        n_b = sum(1 for r in rows if g3_label(r) == "b")
+        if not n_b:
+            return rows                    # b 없는 묶음(a · c · d)은 그대로 — 셋에 고르게 나눈다
+        a_rows = [r for r in rows if g3_label(r) == "a"][:G3_A_PER_B[source] * n_b]
+        return [r for r in rows if g3_label(r) != "a"] + a_rows
+    return rows
+
+
+def reserve_g3(build, forbid, old_root, seed=G3_SEED, targets=None, vitc_path=None, old_index=None):
+    """평가 몫을 묶음째 예약하고 남은 묶음을 학습 층으로 → (예약 문서, 셋별 줄, 학습 층 줄)."""
+    targets = targets or G3_B_TARGET
+    rng = random.Random(seed)
+    paths = {s: os.path.join(build, rel) for s, rel in G3_INPUTS.items()}
+    paths["vitaminc"] = vitc_path or os.path.join(old_root, "build", "g2", "vitaminc-heldout", "candidates.jsonl")
+    loaded = {s: read_jsonl(p) if os.path.exists(p) else None for s, p in paths.items()}
+    old_index = old_index if old_index is not None else _old_eval_index(old_root)
+    doc = {"seed": seed, "targets": targets, "keep": G3_KEEP, "floor": G3_FLOOR, "a_per_b": G3_A_PER_B,
+           "inputs": {s: {"path": os.path.relpath(p, build) if p.startswith(build) else os.path.basename(p),
+                          "rows": len(loaded[s]) if loaded[s] is not None else None} for s, p in paths.items()},
+           "sets": {s: {} for s in G3_SETS}, "shift": {}, "pending": {}, "dropped_eval": {},
+           "dropped_train": {}, "overlap": collections.Counter(), "missing": list(forbid.missing)}
+    owner, owner_src, owner_key = {}, {}, {}
+    owned_index = ParaIndex()
+    eval_rows = {s: [] for s in G3_SETS}
+    shift = {s: collections.Counter() for s in G3_SETS}
+    for source in G3_ORDER:
+        rows = loaded[source]
+        keep = G3_KEEP.get(source, 1.0)
+        tgt = {s: targets.get(s, {}).get(source, 0) + shift[s][source] for s in G3_SETS}
+        dropped = collections.Counter()
+        good = collections.defaultdict(list)
+        for row in rows or []:
+            if source == "vitaminc" and row.get("hint") != "b":
+                continue
+            if row.get("keep") is False:
+                dropped["keep_false"] += 1
+                continue
+            why = forbid.reasons(row, "eval")
+            if row.get("lang") == "ko" and old_index.hits(row):
+                why.append("para_old")
+            if why:
+                dropped.update(why)
+                continue
+            good[row["group"]].append(row)
+        order = sorted(good)
+        (random.Random(f"{seed}:{source}") if source in G3_OWN_RNG else rng).shuffle(order)
+        # b 가 든 묶음 먼저(몫 채우기), 그다음 b 없는 묶음(a · c · d 를 셋에 고르게)
+        order.sort(key=lambda g: not any(g3_label(r) == "b" for r in good[g]))
+        covered = {s: 0.0 for s in G3_SETS}
+        count = collections.Counter()
+        rows_in = collections.Counter()
+
+        def hungry_b():
+            open_sets = [s for s in G3_SETS if tgt[s] and (covered[s] < tgt[s] or (keep < 1 and count[s] < G3_FLOOR * tgt[s]))]
+            if not open_sets:
+                return None
+            if source in G3_PRIORITY:
+                return open_sets[0]
+            return min(open_sets, key=lambda s: (covered[s] / tgt[s], G3_SETS.index(s)))
+
+        def hungry_rest():
+            sized = [s for s in G3_SETS if tgt[s]]
+            return min(sized, key=lambda s: (rows_in[s] / tgt[s], G3_SETS.index(s))) if sized else None
+
+        for gid in order:
+            has_b = any(g3_label(r) == "b" for r in good[gid])
+            set_name = hungry_b() if has_b else (hungry_rest() if source in G3_REST_TO_EVAL else None)
+            if set_name is None:
+                continue
+            if gid in owner:
+                continue
+            picked = []
+            for row in _group_rows(source, good[gid]):
+                if {owner[g] for g in row.get("groups") or [row["group"]] if g in owner} - {set_name}:
+                    dropped["group_other_set"] += 1
+                    continue
+                if set(row.get("src_ids", [])) & set(owner_src) or _both_keys(row) & set(owner_key):
+                    dropped["src_or_text_owned"] += 1
+                    continue
+                if row.get("lang") == "ko" and owned_index.hits(row) - {set_name}:
+                    dropped["para_cross_set"] += 1
+                    doc["overlap"]["eval_para_cross_set_dropped"] += 1
+                    continue
+                picked.append(row)
+            if not picked:
+                continue
+            for g in {g for r in picked for g in r.get("groups") or [r["group"]]} | {gid}:
+                owner[g] = set_name
+            for r in picked:
+                owner_src.update({src: set_name for src in r.get("src_ids", [])})
+                owner_key.update({k: set_name for k in _both_keys(r)})
+                owned_index.add(r, set_name)
+                eval_rows[set_name].append(dict(r, set=set_name, g3_source=source, g3_label=g3_label(r)))
+            n_b = sum(1 for r in picked if g3_label(r) == "b")
+            covered[set_name] += keep * n_b
+            count[set_name] += n_b
+            rows_in[set_name] += len(picked)
+            entry = doc["sets"][set_name].setdefault(source, {"groups": [], "row_ids": []})
+            entry["groups"].append(gid)
+            entry["row_ids"].extend(r["id"] for r in picked)
+        for set_name in G3_SETS:
+            got = [r for r in eval_rows[set_name] if r["g3_source"] == source]
+            entry = doc["sets"][set_name].setdefault(source, {"groups": [], "row_ids": []})
+            short = max(0, math.ceil(tgt[set_name] - covered[set_name] - 1e-9))
+            entry.update({"b_target": targets.get(set_name, {}).get(source, 0), "b_shift_in": shift[set_name][source],
+                          "b_expected": round(covered[set_name], 1), "b_rows": count[set_name],
+                          "labels": dict(sorted(collections.Counter(r["g3_label"] for r in got).items())),
+                          "rows": len(got), "short": short, "input_missing": rows is None})
+            to = G3_SHIFT.get(source)
+            if rows is None:
+                # 판정 파일이 아직 없는 원천은 넘기지 않고 제 몫(넘겨 받은 것 포함)을 대기로 둔다
+                if tgt[set_name]:
+                    doc["pending"].setdefault(set_name, {})[source] = tgt[set_name]
+            elif short and to:
+                shift[set_name][to] += short
+                doc["shift"].setdefault(set_name, {})[f"{source}->{to}"] = short
+        doc["dropped_eval"][source] = dict(dropped)
+    # 학습 층 : 확정 원천의 예약 안 된 묶음 + 위키 학습 몫. VitaminC heldout · BoolQ · KLUE 평가 몫 나머지는 학습에 안 준다.
+    eval_para = ParaIndex()
+    for rows in eval_rows.values():
+        for r in rows:
+            eval_para.add(r, "g3")
+    for r in _g3_eval_paragraphs(build):
+        eval_para.add(r, "eval-split")
+    train_rows = []
+    train_inputs = {"mit": loaded["mit"], "wiki": loaded["wiki"]}
+    for name, rel in G3_TRAIN_INPUTS.items():
+        path = os.path.join(build, rel)
+        train_inputs[name] = read_jsonl(path) if os.path.exists(path) else None
+        doc["inputs"][name] = {"path": rel, "rows": len(train_inputs[name]) if train_inputs[name] is not None else None}
+    owned_groups, owned_src = set(owner), set(owner_src)
+    for name, rows in train_inputs.items():
+        dropped = collections.Counter()
+        for row in rows or []:
+            why = forbid.reasons(row, "train")
+            if set(row.get("groups") or [row["group"]]) & owned_groups:
+                why.append("group_eval_g3")
+            elif set(row.get("src_ids", [])) & owned_src:
+                why.append("src_eval_g3")
+            elif _both_keys(row) & set(owner_key):
+                why.append("text_eval_g3")
+            if not why:
+                hits = eval_para.hits(row) | (old_index.hits(row) if row.get("lang") == "ko" else set())
+                if hits:
+                    why.append("para_eval")
+                    doc["overlap"]["train_para_" + "_".join(sorted(hits))] += 1
+            if why:
+                dropped.update(why)
+                continue
+            train_rows.append(dict(row, g3_source=name, g3_label=g3_label(row)))
+        doc["dropped_train"][name] = dict(dropped)
+    doc["train"] = {n: {"rows": sum(1 for r in train_rows if r["g3_source"] == n),
+                        "labels": dict(sorted(collections.Counter(r["g3_label"] for r in train_rows
+                                                                  if r["g3_source"] == n).items()))}
+                    for n in train_inputs}
+    doc["overlap"].update({f"eval_para_old_dropped_{s}": doc["dropped_eval"][s].get("para_old", 0) for s in G3_ORDER})
+    doc["overlap"] = dict(doc["overlap"])
+    doc["reserved"] = sorted(owner)
+    return doc, eval_rows, train_rows
+
+
+def check_g3(eval_rows, train_rows, forbid, old_index):
+    """평가 셋 사이 · 평가 × 학습 층 · 둘 × 금지 목록 겹침 수. 0 이어야 한다."""
+    counts = collections.Counter()
+    seen_group, seen_key, seen_src = {}, {}, {}
+    para = ParaIndex()
+    for set_name, rows in eval_rows.items():
+        for row in rows:
+            for gid in row.get("groups") or [row["group"]]:
+                if seen_group.setdefault(gid, set_name) != set_name:
+                    counts["eval_group_across_sets"] += 1
+            for key in _both_keys(row):
+                if seen_key.setdefault(key, set_name) != set_name:
+                    counts["eval_text_across_sets"] += 1
+            for src in row.get("src_ids", []):
+                if seen_src.setdefault(src, set_name) != set_name:
+                    counts["eval_src_across_sets"] += 1
+            if row.get("lang") == "ko":
+                if para.hits(row) - {set_name}:
+                    counts["eval_para_across_sets"] += 1
+                if old_index.hits(row):
+                    counts["eval_para_old"] += 1
+                para.add(row, set_name)
+            for why in forbid.reasons(row, "eval"):
+                counts["eval_" + why] += 1
+    for row in train_rows:
+        if set(row.get("groups") or [row["group"]]) & set(seen_group):
+            counts["train_group_eval"] += 1
+        if _both_keys(row) & set(seen_key):
+            counts["train_text_eval"] += 1
+        if set(row.get("src_ids", [])) & set(seen_src):
+            counts["train_src_eval"] += 1
+        if row.get("lang") == "ko" and para.hits(row):
+            counts["train_para_eval"] += 1
+        for why in forbid.reasons(row, "train"):
+            counts["train_" + why] += 1
+    names = ["eval_group_across_sets", "eval_text_across_sets", "eval_src_across_sets", "eval_para_across_sets",
+             "eval_para_old", "train_group_eval", "train_text_eval", "train_src_eval", "train_para_eval"]
+    names += [f"eval_{why}" for why in ("text_old", "side_old", "mem_id_old", "ruler_mem", "group_g1", "use1_pair",
+                                         "use1_text", "blind_g2_forbid", "seed_g3", "g2_reserved", "page_in_train")]
+    names += [f"train_{why}" for why in ("text_old", "mem_id_old", "ruler_mem", "group_g1", "use1_pair", "use1_text",
+                                          "blind_g2_forbid")]
+    return {k: counts.get(k, 0) for k in names}
+
+
+def forbid_doc(set_name, rows, made_from):
+    """blind-g2.forbid.json 과 같은 꼴의 금지 목록."""
+    out = {"set": set_name, "made_from": made_from,
+           "key_rule": "sha256(evidence.strip() + '\\x1f' + claim.strip())"}
+    mem_ids, docs, commits, groups, srcs = set(), set(), set(), set(), set()
+    for row in rows:
+        mem_ids.update(_MEM_ID.findall(json.dumps(row.get("src_ids", []))))
+        d, c = G3Forbid._docs_commits(row)
+        docs |= d
+        commits |= c
+        groups.update(row.get("groups") or [row["group"]])
+        srcs.update(row.get("src_ids", []))
+    out.update({"mem_ids": sorted(mem_ids), "doc_paths": sorted(docs), "commits": sorted(commits),
+                "groups": sorted(groups), "src_ids": sorted(srcs), "cand_ids": sorted(r["id"] for r in rows),
+                "pair_keys": sorted({sha_key(r) for r in rows})})
+    return out
+
+
+def _g3_forbid(args):
+    root = args.old_root or os.path.join(os.path.expanduser("~"), ".judgemodel")
+    g2_build = args.g2_build or os.path.join(root, "build", "g2")
+    return G3Forbid(root, args.g1_build or os.path.join(root, "build", "g1"),
+                    args.use1 or os.path.join(root, "measure", "use1"),
+                    args.ruler_ids or os.path.join(g2_build, "forbid-ruler-ids.txt"), g2_build,
+                    args.seed_forbid or os.path.join(args.build, "seed", "forbid-g3.txt")), root
+
+
+def reserve_g3_main(args):
+    forbid, root = _g3_forbid(args)
+    if forbid.missing:
+        print(json.dumps({"missing": forbid.missing}, ensure_ascii=False))
+        return 2
+    targets = None
+    if args.targets:
+        with open(args.targets, encoding="utf-8") as f:
+            targets = json.load(f)
+    old_index = _old_eval_index(root)
+    doc, eval_rows, train_rows = reserve_g3(args.build, forbid, root, args.seed, targets, args.vitaminc, old_index)
+    out = os.path.join(args.build, "reserve")
+    os.makedirs(out, exist_ok=True)
+    for set_name, rows in eval_rows.items():
+        _write_jsonl(os.path.join(out, f"{set_name}-cands.jsonl"), rows)
+    _write_jsonl(os.path.join(out, "train-layer-cands.jsonl"), train_rows)
+    doc["check"] = check_g3(eval_rows, train_rows, forbid, old_index)
+    with open(os.path.join(out, "blind-g3.forbid.json"), "w", encoding="utf-8", newline="\n") as f:
+        json.dump(forbid_doc("blind-g3", eval_rows["blind-g3"], ["build/g3/reserve/blind-g3-cands.jsonl"]), f,
+                  ensure_ascii=False, indent=1)
+    with open(os.path.join(out, "reserve-g3.json"), "w", encoding="utf-8", newline="\n") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=1)
+    brief = {s: {src: (v["b_target"], v["b_shift_in"], v["b_expected"], v["rows"], v["short"])
+                 for src, v in per.items()} for s, per in doc["sets"].items()}
+    print(json.dumps({"sets(b_target,shift_in,b_expected,rows,short)": brief, "shift": doc["shift"],
+                      "pending": doc["pending"], "train": doc["train"], "overlap": doc["overlap"],
+                      "check": doc["check"]}, ensure_ascii=False, indent=1))
+    return 1 if sum(doc["check"].values()) else 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="열쇠 묶음 예약 · 학습 후보 · 겹침 검사")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -1306,11 +2155,37 @@ def main(argv=None):
                     help="아카이브 · mem 몫 (기본 --reserve <build>/reserve-archive.json · --out <build>/eval-archive)")
     ev.add_argument("--public-dir", help="--archive 때 이미 쓴 공개 평가 후보 폴더(읽기만, 기본 <build>/eval-public)")
     ev.add_argument("--traps", help="--archive 때 함정 풀 — 셋마다 그 셋 후보와 같은 쌍을 뺀 <셋>-traps.jsonl 을 쓴다")
+    for name in ("reserve-g2", "check-g2"):
+        g2 = sub.add_parser(name, help="v1.2 B 판 b 자 — 평가 몫 예약 · 학습 층 (reserve-g2) / 겹침 검사 (check-g2)")
+        g2.add_argument("--build", required=True, help="g2 후보 뿌리 (<원천>/candidates.jsonl · reserve/ 가 생김)")
+        g2.add_argument("--seed", type=int, default=G2_SEED)
+        g2.add_argument("--old-root", help="옛 셋 뿌리 (기본 ~/.judgemodel)")
+        g2.add_argument("--g1-build", help="g1 후보 뿌리 (reserve.json · reserve-archive.json · klue 다시쓰기, 기본 <old-root>/build/g1)")
+        g2.add_argument("--use1", help="use1 뿌리 (EXCLUDE.sha256list · */set-use1*.jsonl, 기본 <old-root>/measure/use1)")
+        g2.add_argument("--ruler-ids", help="잣대 기억 id 목록 (기본 <build>/forbid-ruler-ids.txt)")
+        g2.add_argument("--train", help="check-g2 : 학습 층 대신 볼 학습 파일 (예 sets/g2/train-g2-b.jsonl)")
+    g3 = sub.add_parser("reserve-g3", help="v1.2 K 판 — g3 평가 셋 새 쌍 묶음째 예약 · 학습 층 · blind-g3.forbid.json")
+    g3.add_argument("--build", required=True, help="g3 뿌리 (kowiki · mit · boolq · klue · seed 아래 판정 파일, reserve/ 가 생김)")
+    g3.add_argument("--seed", type=int, default=G3_SEED)
+    g3.add_argument("--targets", help="셋별 원천 b 목표 json ({셋: {원천: 수}}, 기본 설계 2-3 표)")
+    g3.add_argument("--vitaminc", help="VitaminC heldout 후보 (기본 <old-root>/build/g2/vitaminc-heldout/candidates.jsonl)")
+    g3.add_argument("--old-root", help="옛 셋 뿌리 (기본 ~/.judgemodel)")
+    g3.add_argument("--g1-build", help="g1 후보 뿌리 (기본 <old-root>/build/g1)")
+    g3.add_argument("--g2-build", help="g2 후보 뿌리 (reserve/reserve-g2.json · vitaminc-train, 기본 <old-root>/build/g2)")
+    g3.add_argument("--use1", help="use1 뿌리 (기본 <old-root>/measure/use1)")
+    g3.add_argument("--ruler-ids", help="잣대 기억 id 목록 (기본 <g2-build>/forbid-ruler-ids.txt)")
+    g3.add_argument("--seed-forbid", help="씨앗 금지 목록 (기본 <build>/seed/forbid-g3.txt)")
     at = sub.add_parser("attach-rewrite", help="학습 후보 KLUE 줄에 Opus 평서문 claim 붙이기 → klue 줄만")
     at.add_argument("--cands", required=True, help="학습 후보 (train-cands.jsonl)")
     at.add_argument("--rewrite", nargs="+", required=True, help="rewrite-train-*.jsonl (cand_idx · group · src_ids · claim)")
     at.add_argument("--out", required=True)
     args = parser.parse_args(argv)
+    if args.cmd == "reserve-g2":
+        return reserve_g2_main(args)
+    if args.cmd == "check-g2":
+        return check_g2_main(args)
+    if args.cmd == "reserve-g3":
+        return reserve_g3_main(args)
     if args.cmd == "attach-rewrite":
         return attach_rewrite_main(args)
     if args.cmd == "eval-pool" and args.archive:

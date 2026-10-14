@@ -1,13 +1,19 @@
 # measure — 자 (짝 비교 · 관문)
 
-규약은 `protocol-g1.json` 하나다. 이 파일의 sha256 이 모든 결과에 `protocol_sha256` 으로 붙는다. 고치려면 새 판 파일(`protocol-g2.json`)을 만든다. 설계 `../Docs/Design/2026-10-11-d자료층재구축설계.md` 2-3 · 6-2.
+규약은 `protocol-g1.json`(d 판) · `protocol-g2.json`(b 판, 설계 `../Docs/Design/2026-10-12-v1.2-B판설계.md` 2-2 · 2-3) 둘이다. 파일의 sha256 이 모든 결과에 `protocol_sha256` 으로 붙는다. 첫 비교 뒤 고치려면 새 판 파일을 만든다. 설계 `../Docs/Design/2026-10-11-d자료층재구축설계.md` 2-3 · 6-2.
 
 1. **돌리기 (미니PC)** : `run/seed3.sh <조건> -- <train_nli 인자> --deterministic` 를 `G1_SEEDS="1 2 3 4 5"` 로 → 판 `g1-<조건>-s1`~`s5`. 규약 씨앗은 5 이고 학습은 결정 모드다(45-라 : 같은 씨앗이 비트 단위로 재현됨 · 학습 약 +20% 느림). 판마다 `eval-dev-cal` · `eval-dev-cmp` · 곁 자 평가, `calibration.json`(dev-cal 로), `eval-side.txt` 가 생긴다. 쌍을 더해 견줄 땐 `--replay-n` 을 기준 판 값에 묶는다.
    - **평가만 다시** : 학습만 한 판(`G1_TRAIN_ONLY=1`)은 `G1_EVAL_ONLY=1 run/seed3.sh <조건> --` 로 `runs/<판>/ckpt-best` 를 그대로 잰다 (재실행 판은 `G1_SEEDS=1 G1_SUFFIX=r` 를 같이).
-   - **기준선 자 상태** : `python -I measure/baseline.py --protocol … --set <dev-cmp-g1.jsonl> --runs B0=<판1>/eval-dev-cmp,… --rerun <판1r>/eval-dev-cmp --out b.json --md b.md` → 판별 지표 · 씨앗 짝 반폭(3%p 가리나) · 재실행 차 · 곁 자. 거부 규칙은 compare 와 같다.
+   - **기준선 자 상태** : `python -I measure/baseline.py --protocol … --set <dev-cmp-g1.jsonl> --runs B0=<판1>/eval-dev-cmp,… --rerun <판1r>/eval-dev-cmp --out b.json --md b.md` → 판별 지표 · 씨앗 짝 반폭(3%p 가리나) · 재실행 차 · 곁 자 · 셋에 `lang` 칸이 있으면 언어별(ko · en) b 재현 줄. 릴리스 pick 은 규약 `release_pick` 의 lang 거름까지 compare 와 같게 센다. 거부 규칙은 compare 와 같다.
 2. **짝 비교** : `python -I measure/compare.py --protocol measure/protocol-g1.json --set <dev-cmp-g1.jsonl> --base B0=<판1>/eval-dev-cmp,<판2>/…,<판3>/… --new B1=… --by domain,lang --out c.json --md c.md` → 먹힘 · 같다 · 지킴 깨짐 · 보류.
+   - `pair_gate.alarms` 의 `lang_<지표>` 경보는 `lang_` 뒤 지표(g1 `d_recall` · g2 `b_recall`)를 언어 표에서 읽는다. 언어 · `--by` 표는 d · b 재현 · 3칸을 같이 센다.
+   - `release_pick.metric` 은 릴리스 판을 고르는 지표다(씨앗 평균에 가장 가까운 판). g1 `d_recall` · g2 `b_recall`.
 3. **릴리스 관문** : `python -I measure/gates.py release --protocol … --set <blind-g1.jsonl> --pred <판>/eval-blind --calibration <판>/calibration.json --ref-pred <v1.0.0 pred> --p95-ms <값>`. `gates.py pair …` 는 compare 와 같다.
-   - **사전 등록** : `measure/prereg.py` 도 4칸 모델의 자를 `--protocol`(기본 `measure/protocol-g1.json`)의 `release_gate` 에서 읽어 `criteria` · `release_gate` · `protocol_sha256` 으로 박제한다. 코드에 자 숫자를 두지 않는다. fold40 을 관문에 넣으려면 새 규약에 `fold_wrong_max` 를 넣는다(g1 에는 없음).
+   - 규약에 있는 칸만 잰다. g1 칸 : `acc3_min` · `b_recall_min` · `unsure_max` · `d_recall_min` · `d_sure_precision_min` · `vs_ref_acc3_ci_low_ge`.
+   - g2 `vs_ref` : `[{metric, ci_low_gt | ci_low_ge}]` — 지표마다 기준 모델(`ref_model`) 대비 같은 쌍 차의 묶음 붓스트랩 아래끝. 자 이름 `vs_ref_<지표>`.
+   - g2 `unsure_vs_ref_max_diff` : 보류 몫 ≤ 기준 모델 보류 + 이 값. 기준 모델 보류는 그 모델 제 calibration 으로 센다(`--ref-calibration`, 비면 `--ref-pred` 옆 · 윗 폴더의 `calibration.json` · 없으면 잴 수 없음).
+   - g2 `b_recall_min` 은 g1 과 같은 절대 자(.80). `sets` 에 `TODO-` 값이 남아 있으면 해시가 안 맞아 거부한다.
+   - **사전 등록** : `measure/prereg.py` 도 4칸 모델의 자를 `--protocol`(기본 `measure/protocol-g1.json`)의 `release_gate` 에서 읽어 `criteria` · `release_gate` · `protocol_sha256` 으로 박제한다. 코드에 자 숫자를 두지 않는다. fold40 을 관문에 넣으려면 새 규약에 `fold_wrong_max` 를 넣는다(g1 에는 없음). g2 규약(`vs_ref` 칸이 있는 판)이면 criteria 를 `contradict_recall_min` · `false_support_share_max` · `unsure_vs_ref_max_diff` · `vs_ref` · `ref_model` · `p95_ms_max` 로 박제한다. 판정은 `gates.py release` 로 한다(`run_measure.py` 는 criteria 에 `vs_ref` 가 있으면 재지 않고 exit 2). `next` 문구는 `--next <json 파일>` 이 있으면 그것, 없으면 규약 파일 이름 표(`protocol-g2.json` · `protocol-g3.json`)에서 고르고 표에 없는 이름이면 멈춘다.
 4. **거부(exit 2)** : 판의 `summary.json` 에 `set_sha256` · `protocol_sha256` 이 없거나 다를 때, calibration 이 잴 셋으로 골라졌을 때(`calib_set_sha256` · 옛 `fitted_on.sha256`). 옛 판은 `eval_nli.py --protocol` 로 다시 잰다.
 5. **옛 고리 관문** : `python -I measure/gates.py legacy <diag.json>…` — dev 8 + 곁 3(옆 `eval-side.txt`).
 6. 시험 : `python -m unittest discover -s tests -p "test_compare.py"` · `"test_measure_gates.py"`.
@@ -24,3 +30,9 @@
    - ④ 시험 : `python -I -m unittest discover -s tests -p "test_use_reports.py"` (가짜 대화 기록 · `tests/fake_mem_reports.py`).
    - ⑤ `harvest-harness --alias A --judge-sets [폴더] --runs [폴더]` (`use_sites/harness.py`) : G5 얼린 셋 · 지난 `runs/*/NN-judge.jsonl` 을 읽기만 해 `use1/A/collect/harness-pairs.jsonl` 에 덧붙인다(별명 기본 `harness`). 층은 `judgeset-item` · `judgeset-claim`(id 꼬리 A · B0) · `judgeset-made`(B1~B3 · C) · `runs-*`, 덧칸 `gold` · `semif`(P(A) · .8 / .5 판정) · `main_review`. 축약은 규칙(diff `+` 줄 → bm25 위 2줄 → 쌍 320토큰 안, 서빙 venv 의 XLM-R 토크나이저로 세고 없으면 글자/1.5 어림). 비밀 꼴(키 · 토큰 · 비밀번호 · 집 경로 · IP)은 `refused` 로 본문을 비운다. 돌릴 때마다 `collect/harvest-harness.log.jsonl` 에 셈 한 줄. 그다음 `draw --place 5 --alias A`.
    - ⑤ 시험 : `python -I -m unittest discover -s tests -p "test_use_harness.py"` (가짜 얼린 셋 · 가짜 runs · 글자 어림).
+8. **언어 · 도메인으로 걸러 쓴 자 (g3 꼴, 설계 `../Docs/Design/2026-10-13-v1.2-한국어b보강판설계.md` 2-2 · 2-4)** : 자 항목에 `lang` · `domain` 칸을 달면 셋 줄의 그 칸이 같은 쌍만으로 센다. 예 `{"metric": "b_recall", "lang": "ko"}` · `{"metric": "b_recall", "domain": "mem", "lang": "ko"}`. 칸이 없는 옛 꼴(g1 · g2)은 그대로 돈다.
+   - 이름은 `지표@도메인·언어` 꼴이다 — `b_recall@ko` · `b_recall@mem·ko` · 릴리스 견줌은 `vs_ref_b_recall@ko`. compare 출력 `stats.metrics` 에 이 이름으로 한 줄씩 더 붙고(묶음 붓스트랩 · McNemar 도 걸러진 쌍으로), 관문 표 · 마크다운도 이 이름을 쓴다.
+   - 쓰는 자리 : `pair_gate` 의 `target` · `guards` · `alarms`(새 꼴 경보는 `min_mean_diff` 로 평균 차를 본다 · 옛 `lang_b_recall` 경보도 그대로 읽는다) · `release_pick`(같은 칸, 동률 깨는 acc3 는 쌍 전체) · `release_gate.vs_ref` · `release_gate.b_recall_min`(숫자 하나 · `{metric, lang, min}` 하나 · 그 목록).
+   - 걸러진 쌍이 0 이면 compare · `vs_ref` · 걸러 쓴 절대 자(`b_recall@ko` 등) 모두 거부(exit 2)다. `prereg.py` 는 g3 꼴을 `recall_min_by_slice` · `vs_ref_rulers` 로 풀어 박제한다.
+   - 초안 규약은 `protocol-g3.draft.json` (셋 해시 `TODO-`). 셋을 얼리면 해시를 채워 `protocol-g3.json` 으로 바꿔 첫 짝 비교 전에 커밋한다.
+   - **`protocol-g3.json`** (K 판, 2026-10-13) : `build/assemble_g3.py protocol --draft measure/protocol-g3.draft.json --out measure/protocol-g3.json` 로 채웠다. 세 셋 해시 · 학습 층 해시 `train_sets.train-g3-ko`(재는 셋이 아니라 compare · gates 는 안 읽는다). 수와 해시는 `sets-g3.md` 14절.

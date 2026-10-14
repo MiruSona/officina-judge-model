@@ -15,6 +15,7 @@
 접기 오판(fold40)은 기억 짝 단위라 여기서 안 잰다 — measure/run_fold.py 가 따로 판정한다. 넷 확장 판의 통과는 둘 다 통과다.
 prereg 의 셋 SHA · 모델 SHA 가 다르면 재지 않는다. once 셋은 결과 파일이 이미 있으면 다시 재지 않는다.
 측정 셋에는 want `cd` 쌍을 넣지 않는다 (있으면 멈춘다).
+criteria 에 vs_ref 가 있는 prereg(g2 · g3 규약)는 재지 않고 exit 2 — 판정은 gates.py release 로 잰다.
 """
 import argparse
 import json
@@ -179,6 +180,11 @@ def ladder_table(golds, ladder_rows, model_probs):
 def is_v2(criteria):
     """넷 확장 자(4칸)인가 — d 재현 자가 있으면 그렇다."""
     return "related_recall_min" in criteria
+
+
+def is_release_gate(criteria):
+    """g2 · g3 규약 자(기준 모델 대비 vs_ref)인가 — 이 판정은 여기서 안 하고 gates.py release 가 한다."""
+    return "vs_ref" in criteria
 
 
 def at_least(value, floor):
@@ -351,6 +357,9 @@ def main(argv=None):
     a = parse_args(argv)
     with open(a.prereg, encoding="utf-8") as f:
         prereg = json.load(f)
+    if is_release_gate(prereg.get("criteria") or {}):
+        print("멈춤 : 기준 모델 대비 자(vs_ref)가 있는 prereg 다 — 판정은 gates.py release 로 잰다", file=sys.stderr)
+        return 2
     for spec in a.sets:
         name, path = spec.split("=", 1)
         result = measure_set(a, prereg, name, path)

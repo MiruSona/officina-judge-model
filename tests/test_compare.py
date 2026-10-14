@@ -15,6 +15,7 @@ import compare as cmp
 import gates
 
 PROTOCOL = os.path.join(helpers.ROOT, "measure", "protocol-g1.json")
+PROTOCOL_G2 = os.path.join(helpers.ROOT, "measure", "protocol-g2.json")
 GROUPS = ["g1", "g2", "g3", "g4", "g5"]
 R2 = os.path.join(os.path.expanduser("~"), ".judgemodel", "measure", "2026-10-11-r2", "loop")
 
@@ -74,18 +75,18 @@ def pred_rows(set_rows, fn, seed):
 class Fixture:
     """임시 폴더에 셋 · 판(runs/g1-<조건>-s<씨앗>/eval-dev-cmp) · summary · eval-side 를 만든다."""
 
-    def __init__(self, tmp):
+    def __init__(self, tmp, protocol_path=PROTOCOL):
         self.tmp = tmp
         self.set_rows = make_set()
         self.set_path = os.path.join(tmp, "dev-cmp-g1.jsonl")
         write_jsonl(self.set_path, self.set_rows)
         self.set_sha = cmp.sha256_file(self.set_path)
         # 실제 규약의 셋 해시 칸은 진짜 셋 해시다 — 시험은 그 칸만 가짜 셋 해시로 바꾼 복사본을 쓴다
-        with open(PROTOCOL, encoding="utf-8") as f:
+        with open(protocol_path, encoding="utf-8") as f:
             protocol = json.load(f)
         protocol["sets"] = {name: "" for name in protocol.get("sets", {})}
         protocol["sets"][protocol["compare_on"]] = self.set_sha
-        self.protocol = os.path.join(tmp, "protocol-g1.json")
+        self.protocol = os.path.join(tmp, os.path.basename(protocol_path))
         with open(self.protocol, "w", encoding="utf-8", newline="\n") as f:
             json.dump(protocol, f, ensure_ascii=False, indent=1)
         self.protocol_sha = cmp.sha256_file(self.protocol)
@@ -265,6 +266,79 @@ class VerdictTest(unittest.TestCase):
         self.assertIn("g1-B1-s2", stats["release_pick"]["pick"].replace("\\", "/"))
 
 
+def base_pred_all_right(row, seed):
+    return row["label"]
+
+
+def b_miss_pred(row, seed):
+    """b 기준 판 : 묶음마다 b 둘째(k=5)를 c 로 놓친다. 나머지는 다 맞힘."""
+    if row["label"] == "b" and row["k"] == 5:
+        return "c"
+    return row["label"]
+
+
+class G2PairTest(unittest.TestCase):
+    """protocol-g2 pair_gate — 목표 b 재현 · 지킴 a·c·d · ko b 경보 · 릴리스 판은 b 재현으로 고른다."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.fx = Fixture(self._tmp.name, PROTOCOL_G2)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_b_gain_passes(self):
+        # b 재현 0.5 → 1.0 (묶음마다 b 둘 중 하나 → 둘 다) · 아래끝 0.5 > 0 · a·c·d 그대로
+        protocol, stats = self.fx.stats(b_miss_pred, base_pred_all_right)
+        v = cmp.verdict(protocol, stats)
+        self.assertEqual(v["target"]["metric"], "b_recall")
+        self.assertAlmostEqual(v["target"]["diff"], 0.5)
+        self.assertEqual({g["metric"] for g in v["guards"]},
+                         {"acc3", "a_recall", "c_recall", "d_recall", "false_support", "side_acc3"})
+        self.assertEqual(v["verdict"], "먹힘")
+        self.assertEqual(v["alarms"], [])
+
+    def test_b_same_is_same(self):
+        protocol, stats = self.fx.stats(b_miss_pred, b_miss_pred)
+        self.assertEqual(cmp.verdict(protocol, stats)["verdict"], "같다")
+
+    def test_ko_b_alarm(self):
+        # broken_pred : g1·g2(ko) 의 b 넷을 a 로 → ko b 재현 1.0 → 2/6 (차 −0.6667) · en b 는 그대로
+        protocol, stats = self.fx.stats(base_pred, broken_pred)
+        by_lang = {r["key"]: r for r in stats["by_lang"]}
+        self.assertAlmostEqual(by_lang["ko"]["b_recall"]["diff"], -0.6667, places=4)
+        self.assertEqual(by_lang["en"]["b_recall"]["diff"], 0.0)
+        self.assertEqual(by_lang["ko"]["b_pairs"], 6)
+        alarms = cmp.verdict(protocol, stats)["alarms"]
+        self.assertEqual(len(alarms), 1)
+        self.assertIn("ko b 재현 -0.6667", alarms[0])
+
+    def test_release_pick_uses_b_recall(self):
+        protocol, stats = self.fx.stats(base_pred, new_pred)
+        self.assertEqual(protocol["release_pick"]["metric"], "b_recall")
+        self.assertEqual(stats["release_pick"]["metric"], "b_recall")
+
+    def test_markdown_has_b_column(self):
+        protocol, stats = self.fx.stats(base_pred, broken_pred)
+        stats.pop("_tables")
+        result = {"base": "B2", "new": "B4", "protocol_sha256": "0" * 64, "set_sha256": "0" * 64,
+                  "stats": stats, "verdict": cmp.verdict(protocol, stats)}
+        self.assertIn("b 재현", cmp.to_markdown(result))
+
+
+class G1AlarmRegressionTest(unittest.TestCase):
+    """protocol-g1 의 lang_d_recall 경보는 그대로 d 재현을 본다."""
+
+    def test_ko_d_alarm(self):
+        # 거꾸로 견줌 : ko d 재현 10/12 → 0.5 (차 −0.3333) · b 는 그대로라 b 경보는 없다
+        with tempfile.TemporaryDirectory() as tmp:
+            protocol, stats = Fixture(tmp).stats(new_pred, base_pred)
+        alarms = cmp.verdict(protocol, stats)["alarms"]
+        self.assertEqual(len(alarms), 1)
+        self.assertIn("ko d 재현 -0.3333", alarms[0])
+        self.assertEqual(stats["release_pick"]["metric"], "d_recall")
+
+
 class CliHashTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -335,6 +409,104 @@ class OldRunRecountTest(unittest.TestCase):
         dev, side = gates.legacy_counts(diag, None)
         self.assertEqual(sum(dev), 3)
         self.assertIsNone(side)
+
+
+PROTOCOL_G3 = os.path.join(helpers.ROOT, "measure", "protocol-g3.draft.json")
+
+
+def ko_b_fix_pred(row, seed):
+    """K 흉내 : b_miss_pred 에서 ko(g1~g3) 의 b 만 다 맞힌다. en b 는 그대로 반만."""
+    if row["label"] == "b" and row["lang"] == "ko":
+        return "b"
+    return b_miss_pred(row, seed)
+
+
+def en_b_broken_pred(row, seed):
+    """en(g4·g5) 의 b 를 다 a 로 놓친다. 나머지는 다 맞힘."""
+    if row["label"] == "b" and row["lang"] == "en":
+        return "a"
+    return row["label"]
+
+
+class G3SliceTest(unittest.TestCase):
+    """protocol-g3 초안 — 목표 · 지킴 · 경보 · release_pick 을 언어 · 도메인으로 걸러 쓴다 (설계 2-2 · 5-4)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.fx = Fixture(self._tmp.name, PROTOCOL_G3)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_target_ko_b_slice(self):
+        # ko b : 묶음 g1~g3 마다 1/2 → 2/2 (차 +0.5, 묶음 다 같아 구간 [.5, .5]) · en b 는 0.5 그대로 (차 0)
+        protocol, stats = self.fx.stats(b_miss_pred, ko_b_fix_pred)
+        self.assertEqual(stats["metrics"]["b_recall@ko"]["pairs"], 6)
+        self.assertEqual(stats["metrics"]["b_recall@ko"]["groups"], 3)
+        self.assertAlmostEqual(stats["metrics"]["b_recall@ko"]["diff"], 0.5)
+        self.assertAlmostEqual(stats["metrics"]["b_recall@ko"]["low"], 0.5)
+        self.assertEqual(stats["metrics"]["b_recall@en"]["diff"], 0.0)
+        self.assertAlmostEqual(stats["metrics"]["b_recall"]["diff"], 0.3)  # 쌍 전체 b 10 중 3 더 맞힘
+        v = cmp.verdict(protocol, stats)
+        self.assertEqual(v["target"]["metric"], "b_recall@ko")
+        self.assertTrue(v["target"]["ok"])
+        self.assertIn("b_recall@en", [g["metric"] for g in v["guards"]])
+        self.assertEqual(v["verdict"], "먹힘")
+        self.assertEqual(v["alarms"], [])
+
+    def test_en_b_guard_slice_breaks(self):
+        # en b 1.0 → 0.0 · 지킴 b_recall@en 아래끝 −1 < −.03 → 지킴 깨짐 (ko 목표는 못 채워도 지킴이 먼저)
+        protocol, stats = self.fx.stats(base_pred_all_right, en_b_broken_pred)
+        v = cmp.verdict(protocol, stats)
+        guards = {g["metric"]: g for g in v["guards"]}
+        self.assertIs(guards["b_recall@en"]["ok"], False)
+        self.assertIn("b_recall@en 차 -1.0000", guards["b_recall@en"]["note"])
+        self.assertEqual(v["verdict"], "지킴 깨짐")
+
+    def test_mem_ko_alarm_slice(self):
+        # broken_pred : g1·g2(mem·ko) 의 b 넷을 a 로 → mem·ko b 차 −0.6667 · ko a 는 그대로라 경보 하나
+        protocol, stats = self.fx.stats(base_pred, broken_pred)
+        self.assertAlmostEqual(stats["metrics"]["b_recall@mem·ko"]["diff"], -0.6667, places=4)
+        alarms = cmp.verdict(protocol, stats)["alarms"]
+        self.assertEqual(len(alarms), 1)
+        self.assertIn("b_recall@mem·ko 평균 차 -0.6667", alarms[0])
+
+    def test_release_pick_slice(self):
+        protocol, stats = self.fx.stats(base_pred, new_pred)
+        self.assertEqual(stats["release_pick"]["metric"], "b_recall@ko")
+        self.assertEqual(stats["release_pick"]["value"], 1.0)
+
+    def test_empty_slice_refuses(self):
+        protocol, stats = self.fx.stats(base_pred, new_pred)
+        base, new = stats["_tables"]
+        with self.assertRaises(cmp.Refuse):
+            cmp.slice_compare(protocol, cmp.read_set(self.fx.set_path), base, new, {"metric": "b_recall", "lang": "jp"})
+
+    def test_markdown_lists_slice_rulers(self):
+        protocol, stats = self.fx.stats(b_miss_pred, ko_b_fix_pred)
+        stats.pop("_tables")
+        result = {"base": "B2", "new": "K", "protocol_sha256": "0" * 64, "set_sha256": "0" * 64,
+                  "stats": stats, "verdict": cmp.verdict(protocol, stats)}
+        md = cmp.to_markdown(result)
+        self.assertIn("| 목표 b_recall@ko | O |", md)
+        self.assertIn("| b_recall@mem·ko |", md)
+
+
+class OldFormCompatTest(unittest.TestCase):
+    """옛 꼴(metric 문자열만)은 이름 · 지표 표가 그대로다 — g2 출력에 @ 자가 안 끼어든다."""
+
+    def test_ruler_name_old_form(self):
+        self.assertEqual(cmp.ruler_name({"metric": "b_recall", "ci_low_gt": 0.0}), "b_recall")
+        self.assertFalse(cmp.is_slice({"metric": "b_recall"}))
+        self.assertEqual(cmp.ruler_name({"metric": "b_recall", "lang": "ko", "domain": "mem"}), "b_recall@mem·ko")
+
+    def test_g2_metrics_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fx = Fixture(tmp, PROTOCOL_G2)
+            protocol, stats = fx.stats(base_pred, broken_pred)
+            self.assertEqual(list(stats["metrics"]), list(cmp.METRICS))
+            self.assertEqual(stats["release_pick"]["metric"], "b_recall")
+            self.assertEqual(cmp.gate_slice_specs(protocol), [])
 
 
 if __name__ == "__main__":

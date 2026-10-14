@@ -194,6 +194,63 @@ def hit_counts(table, metric):
     return mask, hits
 
 
+# 자를 언어 · 도메인으로 걸러 쓰는 칸 (protocol-g3 부터). 자 이름 꼬리는 이 차례로 붙는다 — b_recall@mem·ko
+SLICE_KEYS = ("domain", "lang")
+
+
+def is_slice(spec):
+    """{"metric": "b_recall", "lang": "ko"} 처럼 거름 칸이 있는 자인가. 옛 꼴(metric 만)은 False."""
+    return any(spec.get(k) for k in SLICE_KEYS)
+
+
+def ruler_name(spec):
+    """자 이름 — 거름이 없으면 지표 이름 그대로(g1 · g2 와 같다), 있으면 b_recall@ko · b_recall@mem·ko."""
+    parts = [str(spec[k]) for k in SLICE_KEYS if spec.get(k)]
+    return spec["metric"] + ("@" + "·".join(parts) if parts else "")
+
+
+def slice_positions(set_rows, ids, spec):
+    """쌍 표 차례(ids)에서 거름 칸이 다 맞는 자리 번호."""
+    want = {k: str(spec[k]) for k in SLICE_KEYS if spec.get(k)}
+    return [pos for pos, pid in enumerate(ids)
+            if all(str(set_rows.get(pid, {}).get(k)) == v for k, v in want.items())]
+
+
+def sub_table(table, positions):
+    """쌍 표에서 몇 자리만 떼어 같은 꼴의 표로."""
+    return {"ids": [table["ids"][i] for i in positions], "gold": [table["gold"][i] for i in positions],
+            "counts": [table["counts"][i] for i in positions], "seeds": table["seeds"]}
+
+
+def slice_compare(protocol, set_rows, base, new, spec):
+    """자 하나를 걸러진 쌍만으로 — 묶음 붓스트랩(new − base) · McNemar. 셀 쌍이 0 이면 Refuse(규약 · 셋 칸이 어긋남).
+
+    base · new 는 같은 차례의 쌍 표다 (짝 비교의 두 조건, 또는 릴리스의 ref · 잴 판).
+    """
+    positions = slice_positions(set_rows, base["ids"], spec)
+    b, n = sub_table(base, positions), sub_table(new, positions)
+    key = protocol.get("group_key", "group")
+    groups = [str(set_rows[pid].get(key) or pid) for pid in b["ids"]]
+    boot = protocol.get("bootstrap", {})
+    s = cluster_bootstrap(groups, b, n, spec["metric"], boot.get("n", 10000), boot.get("ci", 0.95),
+                          boot.get("rng_seed", 20261011))
+    if s["pairs"] == 0:
+        raise Refuse(f"자 {ruler_name(spec)} 에 셀 쌍이 없다 — 셋의 {' · '.join(SLICE_KEYS)} 칸과 규약을 본다")
+    s["metric"] = ruler_name(spec)
+    s["mcnemar"] = mcnemar_exact(majority(b, spec["metric"]), majority(n, spec["metric"]))
+    return s
+
+
+def gate_slice_specs(protocol):
+    """pair_gate 의 목표 · 지킴 · 경보 중 걸러 쓴 자 (나온 차례, 같은 이름은 하나)."""
+    gate = protocol.get("pair_gate", {})
+    specs = {}
+    for spec in [gate.get("target", {})] + gate.get("guards", []) + gate.get("alarms", []):
+        if spec.get("metric") in METRICS and is_slice(spec):
+            specs.setdefault(ruler_name(spec), spec)
+    return list(specs.values())
+
+
 def rate(table, metric):
     mask, hits = hit_counts(table, metric)
     n = sum(mask)
@@ -306,17 +363,25 @@ def sure_report(runs, ids):
             "d_sure_precision": round(sum(known) / len(known), 4) if known else None}
 
 
-def pick_release(runs, ids, metric="d_recall"):
-    """씨앗 판 중 지표가 평균에 가장 가까운 판 (최고 판 아님 — 승자 저주). 같으면 acc3 높은 판 · 씨앗 작은 판."""
+def pick_release(runs, ids, metric="d_recall", set_rows=None, spec=None):
+    """씨앗 판 중 지표가 평균에 가장 가까운 판 (최고 판 아님 — 승자 저주). 같으면 acc3 높은 판 · 씨앗 작은 판.
+
+    spec(규약 release_pick)에 거름 칸(lang · domain)이 있으면 지표만 걸러진 쌍으로 센다. acc3 동률 깨기는 쌍 전체로.
+    """
+    sliced = bool(spec) and is_slice(spec)
+    name = ruler_name(dict(spec, metric=metric)) if sliced else metric
     scores = []
     for i, run in enumerate(runs):
         table = pair_hits([run], ids)
-        scores.append((rate(table, metric), rate(table, "acc3"), i))
+        value = rate(table, metric)
+        if sliced:
+            value = rate(sub_table(table, slice_positions(set_rows or {}, table["ids"], spec)), metric)
+        scores.append((value, rate(table, "acc3"), i))
     if any(s[0] is None for s in scores):
         return None
     mean = sum(s[0] for s in scores) / len(scores)
     best = min(scores, key=lambda s: (abs(s[0] - mean), -s[1], s[2]))
-    return {"metric": metric, "mean": round(mean, 4), "pick": runs[best[2]]["path"], "value": round(best[0], 4)}
+    return {"metric": name, "mean": round(mean, 4), "pick": runs[best[2]]["path"], "value": round(best[0], 4)}
 
 
 def calib_sha(calibration):
@@ -345,8 +410,11 @@ def check_hashes(protocol, protocol_sha, set_sha, conditions):
                 raise Refuse(f"[{name}] {run['path']} 의 calibration 이 잴 셋으로 골랐다 — 문턱은 dev-cal 로만")
 
 
+BY_METRICS = ("d_recall", "b_recall", "acc3")
+
+
 def by_table(set_rows, ids, base, new, keys):
-    """--by 표 — 칸 조합마다 d 재현 · 3칸 정확도 (base · new · 차). 점 추정만, 구간 없음."""
+    """--by 표 — 칸 조합마다 d · b 재현 · 3칸 정확도 (base · new · 차). 점 추정만, 구간 없음."""
     buckets = {}
     for pos, pid in enumerate(ids):
         row = set_rows.get(pid, {})
@@ -357,8 +425,9 @@ def by_table(set_rows, ids, base, new, keys):
         sub = buckets[key]
         b = {"gold": [base["gold"][i] for i in sub], "counts": [base["counts"][i] for i in sub], "seeds": base["seeds"]}
         n = {"gold": [new["gold"][i] for i in sub], "counts": [new["counts"][i] for i in sub], "seeds": new["seeds"]}
-        line = {"key": key, "pairs": len(sub), "d_pairs": sum(1 for g in b["gold"] if g == RELATED)}
-        for metric in ("d_recall", "acc3"):
+        line = {"key": key, "pairs": len(sub), "d_pairs": sum(1 for g in b["gold"] if g == RELATED),
+                "b_pairs": sum(1 for g in b["gold"] if g == CONTRA)}
+        for metric in BY_METRICS:
             rb, rn = rate(b, metric), rate(n, metric)
             line[metric] = {"base": rb, "new": rn, "diff": None if rb is None or rn is None else round(rn - rb, 4)}
         out.append(line)
@@ -381,12 +450,15 @@ def compare(protocol, set_rows, base_runs, new_runs):
                               boot.get("rng_seed", 20261011))
         s["mcnemar"] = mcnemar_exact(majority(base, metric), majority(new, metric))
         stats["metrics"][metric] = s
+    for spec in gate_slice_specs(protocol):
+        stats["metrics"][ruler_name(spec)] = slice_compare(protocol, set_rows, base, new, spec)
     stats["false_support"] = {"base": false_support_mean(base), "new": false_support_mean(new)}
     side_names = protocol.get("side", {})
     stats["side"] = {"base": side_means(base_runs, side_names), "new": side_means(new_runs, side_names)}
     stats["by_lang"] = by_table(set_rows, base["ids"], base, new, ["lang"])
     stats["sure"] = {"base": sure_report(base_runs, base["ids"]), "new": sure_report(new_runs, new["ids"])}
-    stats["release_pick"] = pick_release(new_runs, base["ids"], protocol.get("release_pick", {}).get("metric", "d_recall"))
+    pick = protocol.get("release_pick", {})
+    stats["release_pick"] = pick_release(new_runs, base["ids"], pick.get("metric", "d_recall"), set_rows, pick)
     stats["_tables"] = (base, new)
     return stats
 
@@ -410,20 +482,22 @@ def guard_result(guard, stats):
             ok = ok and diff >= guard["min_mean_diff"] - 1e-9
             notes.append(f"{key} {diff:+.4f}")
         return ok, " · ".join(notes)
-    s = stats["metrics"][metric]
-    return s["low"] >= guard["ci_low_ge"] - 1e-9, f"{metric} 차 {s['diff']:+.4f} [{s['low']:+.4f}, {s['high']:+.4f}]"
+    name = ruler_name(guard)
+    s = stats["metrics"][name]
+    return s["low"] >= guard["ci_low_ge"] - 1e-9, f"{name} 차 {s['diff']:+.4f} [{s['low']:+.4f}, {s['high']:+.4f}]"
 
 
 def verdict(protocol, stats):
     """관문 표 → 먹힘 · 같다 · 지킴 깨짐 · 보류 (뜻은 protocol pair_gate.verdicts)."""
     gate = protocol["pair_gate"]
     target = gate["target"]
-    t = stats["metrics"][target["metric"]]
+    target_name = ruler_name(target)
+    t = stats["metrics"][target_name]
     target_ok = t["diff"] >= target["min_mean_diff"] - 1e-9 and t["low"] > target["ci_low_gt"]
     guards = []
     for guard in gate["guards"]:
         ok, note = guard_result(guard, stats)
-        guards.append({"metric": guard["metric"], "ok": ok, "note": note})
+        guards.append({"metric": ruler_name(guard), "ok": ok, "note": note})
     alarms = []
     for alarm in gate.get("alarms", []):
         if alarm["metric"] == "k48_hits":
@@ -431,10 +505,19 @@ def verdict(protocol, stats):
             if sn.get("k48_hits") is not None and sn["k48_hits"] < alarm["min"]:
                 alarms.append(f"K48 맞힌 수 평균 {sn['k48_hits']:.1f} < {alarm['min']}")
             continue
+        if alarm["metric"] in METRICS:
+            # 새 꼴 (g3) — {"metric": "b_recall", "domain": "mem", "lang": "ko", "min_mean_diff": …} 를 걸러 쓴 자로
+            name = ruler_name(alarm)
+            diff = stats["metrics"][name]["diff"]
+            if diff is not None and diff < alarm["min_mean_diff"]:
+                alarms.append(f"{name} 평균 차 {diff:+.4f} < {alarm['min_mean_diff']}")
+            continue
+        # 옛 꼴 lang_d_recall · lang_b_recall (g1 · g2) — 「lang_」 뒤가 by_lang 줄에서 볼 지표다
+        metric = alarm["metric"][len("lang_"):]
         for line in stats["by_lang"]:
-            diff = line["d_recall"]["diff"]
+            diff = line[metric]["diff"]
             if line["key"] == alarm["lang"] and diff is not None and diff < alarm["min_mean_diff"]:
-                alarms.append(f"{alarm['lang']} d 재현 {diff:+.4f} < {alarm['min_mean_diff']}")
+                alarms.append(f"{alarm['lang']} {metric[0]} 재현 {diff:+.4f} < {alarm['min_mean_diff']}")
     if any(g["ok"] is False for g in guards):
         word = "지킴 깨짐"
     elif not target_ok:
@@ -443,7 +526,7 @@ def verdict(protocol, stats):
         word = "보류"
     else:
         word = "먹힘"
-    return {"verdict": word, "target": {"metric": target["metric"], "ok": target_ok, "diff": t["diff"],
+    return {"verdict": word, "target": {"metric": target_name, "ok": target_ok, "diff": t["diff"],
                                          "low": t["low"], "high": t["high"]},
             "guards": guards, "alarms": alarms}
 
@@ -468,10 +551,12 @@ def to_markdown(result):
     for title, rows in (("언어", result["stats"]["by_lang"]), ("나눔", result.get("by", []))):
         if not rows:
             continue
-        lines += ["", f"| {title} | 쌍 | d 쌍 | d 재현 base → new (차) | 3칸 base → new (차) |", "| --- | --- | --- | --- | --- |"]
+        lines += ["", f"| {title} | 쌍 | d 쌍 | d 재현 base → new (차) | b 쌍 | b 재현 base → new (차) "
+                      "| 3칸 base → new (차) |", "| --- | --- | --- | --- | --- | --- | --- |"]
         for r in rows:
-            d, a = r["d_recall"], r["acc3"]
+            d, b, a = r["d_recall"], r["b_recall"], r["acc3"]
             lines.append(f"| {r['key']} | {r['pairs']} | {r['d_pairs']} | {fmt(d['base'])} → {fmt(d['new'])} ({fmt(d['diff'])}) "
+                         f"| {r['b_pairs']} | {fmt(b['base'])} → {fmt(b['new'])} ({fmt(b['diff'])}) "
                          f"| {fmt(a['base'])} → {fmt(a['new'])} ({fmt(a['diff'])}) |")
     return "\n".join(lines) + "\n"
 

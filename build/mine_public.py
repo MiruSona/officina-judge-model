@@ -1,6 +1,8 @@
 """mine_public — 공개 원천에서 열쇠 묶음과 후보 쌍을 뽑는다 (설계 d자료층재구축 3-1 · 3-2).
 
-하위 명령마다 원천 하나 : proposals · vitaminc · klue-mrc · minicheck · ood · jira(먼저 jira_dump.py slim).
+하위 명령마다 원천 하나 : proposals · vitaminc · klue-mrc · minicheck · ood · jira(먼저 jira_dump.py slim)
+· vitaminc-heldout · vitaminc-train (v1.2 B 판 b 후보, `--out <build>/g2`)
+· kobest-boolq · klue-answered (v1.2 K 판 한국어 b 후보, `~/.judgemodel/build/g3`, 쓰는 꼴이 달라 아래 함수 설명을 본다).
 각각 (가) 열쇠 묶음 `group` 을 만들고 (나) d·a·b·c 후보 규칙으로 쌍을 뽑아 `form` 을 적고
 (다) 공통 거르기(10~400자 · URL · 코드 덩이 · 빈 글)를 한다.
 
@@ -11,6 +13,7 @@
     python -I mine_public.py proposals --raw <raw>/proposals --out <build>/g1
 """
 import argparse
+import bisect
 import collections
 import glob
 import hashlib
@@ -19,6 +22,7 @@ import os
 import random
 import re
 import sys
+import unicodedata
 import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -530,6 +534,53 @@ def mine_vitaminc(raw, rng, read_rows=None):
     return col
 
 
+# ---------------------------------------------------------------- VitaminC b (v1.2 B 판)
+
+def mine_vitaminc_g2(raw, rng, split, read_rows=None):
+    """VitaminC 실제 판 고침의 b 후보. 설계 v1.2-B판 3-1 · 5-1 B.
+
+    heldout(평가용) : REFUTES 줄 전부 (form labeled). train(학습 층용) : 같은 판 고침(case_id) · 같은 주장에
+    SUPPORTS 근거와 REFUTES 근거가 다 있는 짝만 a · b 두 줄로 (form contrast, 같은 `pair`). 묶음은 g1 과 같은 「vitc:문서」.
+    """
+    if read_rows is None:
+        from parquet_lite import read_rows
+    files = {"train": ("train.parquet",), "heldout": ("validation.parquet", "test.parquet")}[split]
+    col = Collector("vitaminc-" + split, "CC-BY-SA-3.0")
+    by_page = collections.defaultdict(list)
+    for name in files:
+        for row in read_rows(os.path.join(raw, name)):
+            if row.get("revision_type") == "real":
+                by_page[row["page"]].append(row)
+    for page in sorted(by_page):
+        gid = col.group("vitc:" + page, split, title=page)
+        rows = sorted(by_page[page], key=lambda r: r["unique_id"])
+        if split == "heldout":
+            for row in rows:
+                if row["label"] == "REFUTES":
+                    col.add(row["evidence"], row["claim"], "b", "labeled", [gid], "en", split, [row["unique_id"]],
+                            domain="vitaminc")
+            continue
+        by_claim = collections.defaultdict(dict)
+        for row in rows:
+            by_claim[(row["case_id"], row["claim"])].setdefault(row["label"], row)
+        keys = sorted(by_claim)
+        rng.shuffle(keys)
+        for case_id, claim in keys:
+            both = by_claim[(case_id, claim)]
+            sup, ref = both.get("SUPPORTS"), both.get("REFUTES")
+            if not sup or not ref or sup["evidence"] == ref["evidence"]:
+                continue
+            pair = case_id + ":" + short_hash(claim, 8)
+            kept = len(col.rows)
+            ok = col.add(ref["evidence"], claim, "b", "contrast", [gid], "en", split, [ref["unique_id"]],
+                         domain="vitaminc", pair=pair)
+            if ok and not col.add(sup["evidence"], claim, "a", "contrast", [gid], "en", split, [sup["unique_id"]],
+                                  domain="vitaminc", pair=pair):
+                del col.rows[kept:]           # 짝 한쪽만 남으면 버린다 (설계 5-1 「한쪽만 남은 짝은 버림」)
+                col.dropped["half_pair"] += 1
+    return col
+
+
 # ---------------------------------------------------------------- KLUE-MRC
 
 _JOSA = ("에서는", "에서", "으로", "에게", "까지", "부터", "이라", "라는", "은", "는", "이", "가", "을", "를", "의",
@@ -873,6 +924,401 @@ def mine_jira(raw, rng):
     return col
 
 
+# ---------------------------------------------------------------- v1.2 K 판 (g3) 공통 — 문단 겹침
+
+def _norm(text):
+    return " ".join(unicodedata.normalize("NFKC", text or "").split()).lower()
+
+
+def char3(text):
+    """정규화한 글(빈칸 뺌)의 글자 3묶음 집합. 문단끼리 닮음을 볼 때 쓴다."""
+    flat = "".join(_norm(text).split())
+    return {flat[i:i + 3] for i in range(len(flat) - 2)}
+
+
+def jaccard(a, b):
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def overlap_against(base_texts, other_texts, threshold=0.8):
+    """other 글마다 base 에 같은 글(정규화 일치)이나 글자 3묶음 닮음 ≥ threshold 인 글이 있나.
+
+    돌려줌 : {other 차례: "exact" | "near"}. 닮음은 크기가 threshold 배 안쪽인 것끼리만 잰다(그 밖은 닿을 수 없다).
+    """
+    base_norm = {_norm(t) for t in base_texts}
+    grams = sorted((len(g), i, g) for i, g in enumerate(char3(t) for t in sorted(set(base_texts))))
+    sizes = [n for n, _, _ in grams]
+    found = {}
+    for index, text in enumerate(other_texts):
+        if _norm(text) in base_norm:
+            found[index] = "exact"
+            continue
+        mine = char3(text)
+        if not mine:
+            continue
+        low = bisect.bisect_left(sizes, len(mine) * threshold)
+        high = bisect.bisect_right(sizes, len(mine) / threshold)
+        if any(jaccard(mine, g) >= threshold for _, _, g in grams[low:high]):
+            found[index] = "near"
+    return found
+
+
+def write_jsonl(path, rows):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def stem_words(text):
+    """낱말에서 조사를 대충 뗀 줄기 (2자 이상). question_entities 와 같은 규칙이되 지문을 안 본다."""
+    out = []
+    for word in re.findall(r"[0-9A-Za-z가-힣]+", text):
+        for josa in _JOSA:
+            if word.endswith(josa) and len(word) - len(josa) >= 2:
+                word = word[:-len(josa)]
+                break
+        if len(word) >= 2 and word not in out:
+            out.append(word)
+    return out
+
+
+# ---------------------------------------------------------------- KoBEST BoolQ (v1.2 K 판 · 설계 3-2)
+
+BOOLQ_FILES = (("train.jsonl", "train"), ("validation.jsonl", "dev"), ("test.jsonl", "test"))
+BOOLQ_HINT = {0: "b", 1: "a"}          # 라벨 0(아니오) → b 후보 · 1(예) → a 짝
+BOOLQ_KEEP = 3                         # 문단이 길면 질문과 낱말이 많이 겹치는 문장 이만큼까지
+BOOLQ_NEAR = 0.8                       # 문단 겹침 : 글자 3묶음 닮음 하한
+# 물음꼴 : 물음표로 끝나거나 「~나요 · ~인가 · ~는가 · ~을까 …」로 끝난다. 「~니 · ~냐」는 「어머니」 같은 말과 갈려 물음표 있을 때만.
+_ASKING = re.compile(r"(?:[?？]|(?:나요|까요|니까|는가|은가|인가|던가|을까|일까|느냐)\s*\.?)\s*$")
+
+
+def is_asking(text):
+    return bool(_ASKING.search((text or "").strip()))
+
+
+def shorten_paragraph(paragraph, question, keep=BOOLQ_KEEP, limit=MAX_LEN):
+    """limit 를 넘는 문단은 질문 낱말이 많이 든 문장을 keep 개까지(limit 안에서) 골라 원래 차례로 잇는다."""
+    paragraph = " ".join(paragraph.split())
+    if len(paragraph) <= limit:
+        return paragraph
+    sentences = split_sentences(paragraph, "ko")
+    words = stem_words(question)
+    ranked = sorted(range(len(sentences)), key=lambda i: (-sum(w in sentences[i] for w in words), i))
+    picked = []
+    for i in ranked:
+        if len(" ".join(sentences[j] for j in sorted(picked + [i]))) <= limit:
+            picked.append(i)
+        if len(picked) == keep:
+            break
+    return " ".join(sentences[i] for i in sorted(picked))
+
+
+def mine_kobest_boolq(raw):
+    """BoolQ 세 판 → 줄 목록 · 요약. 근거 = 문단(길면 줄임) · 주장 = 질문 · 물음꼴이면 needs_rewrite."""
+    rows, dropped, paragraphs = [], collections.Counter(), {}
+    for name, split in BOOLQ_FILES:
+        paragraphs[split] = []
+        for index, line in enumerate(read_text(os.path.join(raw, name)).splitlines()):
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            paragraph = " ".join(item["paragraph"].split())
+            question = " ".join(item["question"].split())
+            paragraphs[split].append(paragraph)
+            evidence = shorten_paragraph(paragraph, question)
+            if not text_ok(evidence):
+                dropped["evidence"] += 1
+                continue
+            if len(question) < 5 or _norm(question) == _norm(evidence):
+                dropped["claim"] += 1
+                continue
+            gid = "boolq:" + short_hash(_norm(paragraph))
+            rows.append({
+                "id": f"boolq-{split}-{index + 1:05d}", "evidence": evidence, "claim": question, "want": "",
+                "hint": BOOLQ_HINT[int(item["label"])], "form": "labeled", "domain": "kobest-boolq",
+                "group": gid, "groups": [gid], "lang": "ko", "lic": "CC-BY-SA-4.0", "split": split,
+                "src_ids": [f"kobest-boolq:{split}:{index + 1:05d}"], "origin": "g3-boolq",
+                "needs_rewrite": is_asking(question), "shortened": evidence != paragraph,
+            })
+    overlap = {}
+    for split in ("dev", "test"):
+        found = overlap_against(paragraphs["train"], paragraphs[split], BOOLQ_NEAR)
+        hit_norm = {_norm(paragraphs[split][i]): kind for i, kind in found.items()}
+        unique = {_norm(p) for p in paragraphs[split]}
+        overlap[split] = {"paragraphs": len(unique), "rows": 0,
+                          "exact": sum(1 for k in hit_norm.values() if k == "exact"),
+                          "near": sum(1 for k in hit_norm.values() if k == "near")}
+        # 근거는 줄여졌을 수 있어 문단 정규형의 해시(= group)로 줄을 찾는다
+        by_group = {"boolq:" + short_hash(n): kind for n, kind in hit_norm.items()}
+        for row in rows:
+            if row["split"] == split and row["group"] in by_group:
+                row["near_train"] = by_group[row["group"]]
+                overlap[split]["rows"] += 1
+    summary = {
+        "source": "kobest-boolq", "rows": len(rows), "dropped": dict(dropped), "overlap_train": overlap,
+        "by_split": {}, "near_threshold": BOOLQ_NEAR,
+    }
+    for split in ("train", "dev", "test"):
+        mine = [r for r in rows if r["split"] == split]
+        asking = sum(r["needs_rewrite"] for r in mine)
+        summary["by_split"][split] = {
+            "rows": len(mine), "hint": dict(sorted(collections.Counter(r["hint"] for r in mine).items())),
+            "needs_rewrite": asking, "declarative_share": round(1 - asking / len(mine), 3) if mine else 0.0,
+            "shortened": sum(r["shortened"] for r in mine), "groups": len({r["group"] for r in mine}),
+        }
+    return rows, summary
+
+
+def run_kobest_boolq(raw, out_dir):
+    rows, summary = mine_kobest_boolq(raw)
+    for _, split in BOOLQ_FILES:
+        write_jsonl(os.path.join(out_dir, split + ".jsonl"), [r for r in rows if r["split"] == split])
+    with open(os.path.join(out_dir, "summary.json"), "w", encoding="utf-8", newline="\n") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=1)
+    return summary
+
+
+# ---------------------------------------------------------------- KLUE-MRC 답 있는 질문 (v1.2 K 판 · 설계 3-5)
+#
+# g1 klue-mrc 후보 가운데 지문이 답을 글자로 적는 질문(유형 1 · 2)만, 답이 날짜 · 서수 · 수 · 사람 · 곳인 것.
+# b = 질문 + 같은 지문 속 같은 종류의 다른 값(alt_answer) · a = 질문 + 참 답. 평서문 만들기는 다음 판(로컬 생성)이라
+# claim 은 질문 그대로 두고 needs_rewrite 를 단다. 같은 종류의 다른 값이 없으면 그 질문은 버린다.
+
+KLUE_ANS_CAP = 4                       # 한 문서(묶음)에서 고르는 질문 상한 — 한 질문이 줄 둘(a · b)
+_KLUE_GROUP = re.compile(r"klue:[0-9a-f]{12}")
+_KLUE_GUID = re.compile(r"klue-mrc-v1_(?:train|dev)_\d+")
+_LEAD = re.compile(r"^(?:약|총|무려|최대|최소|최고|단|불과)\s?")
+_DATE = re.compile(r"^(?:\d{4}년(?:\s?\d{1,2}월(?:\s?\d{1,2}일)?)?|\d{1,2}월\s?\d{1,2}일|\d{1,2}월|\d{1,2}일|"
+                   r"\d{4}\.\s?\d{1,2}\.\s?\d{1,2}\.?)$")
+_ORDINAL = re.compile(r"^(?:제\s?)?\d+\s?(?:위|번째|차|회|등|기|세대|라운드|호|번)$")
+_ORDINAL_WORD = re.compile(r"^(?:첫|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\s?번째$")
+_NUMBER = re.compile(r"^\d[\d,.]*(?:\s?[만억조천]\s?[\d,.]*)*\s?([%％]|[가-힣㎡㎞㎏]{1,3})$")
+# 사람 : 「이름 씨」 · 「이름 직함」(사이 빈칸) 꼴의 세 자 이름(성 한 자) · 네 자 이름(두 자 성)만. 「기초과학연구원」처럼
+# 낱말에 붙은 직함을 이름으로 잘못 읽지 않으려고 직함 앞 빈칸을 요구하고, 성 글자로 거른다.
+_TITLES = ("대표|감독|의원|장관|회장|교수|선수|위원장|사장|대통령|총리|부총리|단장|원장|청장|지사|기자|작가|박사|"
+           "변호사|코치|부회장|전무|상무|팀장|의장|본부장|실장|부장|차관|총장|소장|대변인|검사|판사")
+_PERSON = re.compile(r"(?<![가-힣])([가-힣]{3,4})(?:\s?씨|\s(?:" + _TITLES + "))")
+_SURNAME = frozenset("김이박최정강조윤장임한오서신권황안송류전홍고문양손배백허유남심노하곽성차주우구민진나지엄채원천방공"
+                     "현함변염여추도소석선설마길연위표명기반왕금옥육인맹제모탁국어은편용예경봉")
+_SURNAME2 = ("남궁", "선우", "제갈", "황보", "독고", "사공", "서문")
+_NAME_BAD_END = frozenset("을의를에당부대이가는도과로")   # 「한국을 · 민주당 · 국방부 · 서울대 · 경험이」 꼴 (이 · 가로 끝나는 이름은 버림을 감수)
+_NOT_NAME = frozenset("이사회 마케팅 경제학 지주사 정책위 정치국 국내외 주니어 유전자 하지만 지난해 최연소 원로원 전교조 "
+                      "신세계 기업체 전경련 현대차 공화당 고용부".split())
+_PLACE_Q = re.compile(r"어디|어느\s?(?:나라|도시|지역|국가|곳|장소|섬|대륙)|(?:나라|도시|지역|국가|장소|곳)(?:은|는|이|가)?\s*[?？]?\s*$")
+_PLACE_SUFFIX = ("특별시", "광역시", "시", "군", "구", "현", "주", "역", "공항", "항", "섬", "국")
+_JOSA_AFTER = r"(?=[^가-힣]|$|은|는|이|가|을|를|의|에|에서|으로|로|와|과|도|만)"
+COUNTRIES = frozenset(
+    "한국 대한민국 북한 미국 중국 일본 러시아 영국 독일 프랑스 이탈리아 스페인 포르투갈 네덜란드 벨기에 스위스 오스트리아 "
+    "스웨덴 노르웨이 덴마크 핀란드 폴란드 체코 헝가리 그리스 터키 튀르키예 이집트 이란 이라크 이스라엘 사우디아라비아 "
+    "인도 파키스탄 베트남 태국 필리핀 인도네시아 말레이시아 싱가포르 대만 홍콩 몽골 캐나다 멕시코 브라질 아르헨티나 칠레 "
+    "페루 콜롬비아 호주 오스트레일리아 뉴질랜드 남아프리카공화국 나이지리아 케냐 우크라이나 아일랜드 쿠바 카타르".split())
+CITIES = frozenset(
+    "서울 부산 대구 인천 광주 대전 울산 세종 수원 성남 고양 용인 창원 청주 전주 천안 포항 제주 강릉 춘천 원주 "
+    "도쿄 오사카 교토 베이징 상하이 홍콩 타이베이 뉴욕 워싱턴 로스앤젤레스 시카고 샌프란시스코 런던 파리 베를린 로마 "
+    "마드리드 모스크바 시드니 토론토 밴쿠버 싱가포르 방콕 하노이 호치민 뭄바이 두바이 빈 프라하 암스테르담 브뤼셀".split())
+
+
+_KLUE_SENT = re.compile(r"(?<=[.!?。])\s+|(?<=[다요음]\.)(?=[^\s\d.,)」』’”'\"])")
+
+
+def klue_sentences(context):
+    """KLUE 뉴스 지문은 「했다.다음 문장」처럼 마침표 뒤 빈칸이 없는 곳이 많아 그 자리도 끊는다."""
+    return [" ".join(p.split()) for p in _KLUE_SENT.split(context) if p and p.strip()]
+
+
+def read_forbid_klue(paths):
+    """금지 파일 · 폴더(*.json · *.jsonl 아래 전부)에서 KLUE 묶음(klue:…)과 질문 guid 를 모은다."""
+    groups, guids = set(), set()
+    files = []
+    for path in paths or []:
+        if os.path.isdir(path):
+            for root, _, names in os.walk(path):
+                files.extend(os.path.join(root, n) for n in sorted(names) if n.endswith((".json", ".jsonl")))
+        else:
+            files.append(path)
+    for path in files:
+        text = read_text(path)
+        groups.update(_KLUE_GROUP.findall(text))
+        guids.update(_KLUE_GUID.findall(text))
+    return groups, guids
+
+
+def _squash(text):
+    return re.sub(r"\s+", "", text or "")
+
+
+def _find_values(pattern, context):
+    out = []
+    for match in re.finditer(pattern, context):
+        value = (match.group(1) if match.groups() else match.group(0)).strip()
+        if value and value not in out:
+            out.append(value)
+    return out
+
+
+def is_name(word):
+    if word in _NOT_NAME or word[-1] in _NAME_BAD_END:
+        return False
+    if len(word) == 3:
+        return word[0] in _SURNAME
+    return len(word) == 4 and word[:2] in _SURNAME2
+
+
+def _shape_pattern(core, kind):
+    """답 꼴 → 같은 꼴 값을 찾는 정규식. 날짜는 네 자리 해를 네 자리로 지킨다."""
+    out = []
+    for piece in re.split(r"(\d+|\s+)", core):
+        if not piece:
+            continue
+        if piece.isdigit():
+            out.append(r"\d{4}" if kind == "date" and len(piece) == 4 else (r"\d{1,2}" if kind == "date" else r"\d+"))
+        elif piece.isspace():
+            out.append(r"\s?")
+        else:
+            out.append(re.escape(piece))
+    return r"(?<![\d.,])" + "".join(out) + r"(?![\d])"
+
+
+def answer_kind(question, answer, context):
+    """답 유형과 같은 종류 값 후보(지문 속, 답 뺌 전) → (kind, [값]) · 맞는 유형이 없으면 (None, [])."""
+    core = _LEAD.sub("", answer.strip())
+    if len(core) > 20:
+        return None, []
+    if _DATE.match(core):
+        return "date", _find_values(_shape_pattern(core, "date"), context)
+    if _ORDINAL.match(core):
+        return "ordinal", _find_values(_shape_pattern(core, "ordinal"), context)
+    if _ORDINAL_WORD.match(core):
+        return "ordinal", _find_values(r"(?:첫|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\s?번째", context)
+    number = _NUMBER.match(core)
+    if number and number.group(1):
+        unit = number.group(1).lstrip("만억조천")
+        if unit:
+            # 「5년」 같은 기간이 「2001년」 같은 해를 고르지 않게 년 단위는 세 자리까지만
+            lead = r"\d{1,3}(?![\d])" if unit.startswith("년") else r"\d[\d,.]*"
+            pattern = r"(?<![\d.,])" + lead + r"(?:\s?[만억조천]\s?[\d,.]*)*\s?[만억조천]?" + re.escape(unit)
+            return "number", _find_values(pattern, context)
+    if re.fullmatch(r"[가-힣]{2,4}", core):
+        names = [n for n in _find_values(_PERSON, context) if is_name(n)]
+        if core in names:
+            return "person", names
+    if _PLACE_Q.search(question) and re.fullmatch(r"[가-힣]{2,8}", core):
+        for pool in (COUNTRIES, CITIES):
+            if core in pool:
+                return "place", [w for w in pool if re.search(r"(?<![가-힣])" + w + _JOSA_AFTER, context)]
+        for suffix in sorted(_PLACE_SUFFIX, key=len, reverse=True):
+            if core.endswith(suffix) and len(core) > len(suffix):
+                pattern = r"(?<![가-힣])([가-힣]{1,6}" + suffix + ")" + _JOSA_AFTER
+                return "place", _find_values(pattern, context)
+    return None, []
+
+
+def pick_alt(answers, values, rng):
+    """같은 종류 값 가운데 참 답(여러 표기)과 다르고 서로 품지 않는 것 하나. 없으면 None."""
+    truth = [_squash(_LEAD.sub("", a)) for a in answers if a]
+    pool = [v for v in values
+            if _squash(v) and all(_squash(v) != t and _squash(v) not in t and t not in _squash(v) for t in truth)]
+    return rng.choice(pool) if pool else None
+
+
+def mine_klue_answered(raw, cands_path, forbid_paths, rng, cap=KLUE_ANS_CAP):
+    """g1 klue-mrc 후보 · KLUE 원자료 → (줄 목록, 요약). 한 질문이 b(alt) · a(참) 두 줄, 같은 `pair`."""
+    allowed = {}
+    for line in read_text(cands_path).splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if row.get("form") != "unanswerable" and row.get("answer"):
+            for guid in row.get("src_ids", []):
+                allowed[guid] = row.get("split", "")
+    forbid_groups, forbid_guids = read_forbid_klue(forbid_paths)
+    counts = collections.Counter()
+    by_group = collections.defaultdict(list)
+    for name in ("klue-mrc-v1.1_train.json", "klue-mrc-v1.1_dev.json"):
+        for article in read_json(os.path.join(raw, name))["data"]:
+            gid = "klue:" + short_hash(article["title"])
+            for para in article["paragraphs"]:
+                context = para["context"]
+                sentences = klue_sentences(context)
+                index = None
+                for qa in para["qas"]:
+                    guid = qa["guid"]
+                    if guid not in allowed or qa.get("is_impossible"):
+                        continue
+                    counts["g1_answered"] += 1
+                    if qa.get("question_type") not in (1, 2):
+                        counts["drop_qtype"] += 1
+                        continue
+                    if gid in forbid_groups or guid in forbid_guids:
+                        counts["drop_forbid"] += 1
+                        continue
+                    answers = [a["text"] for a in qa["answers"]]
+                    answer = qa["answers"][0]
+                    kind, values = answer_kind(qa["question"], answer["text"], context)
+                    if kind is None:
+                        counts["drop_kind"] += 1
+                        continue
+                    alt = pick_alt(answers, values, rng)
+                    if alt is None:
+                        counts["drop_no_alt"] += 1
+                        continue
+                    at = _sentence_at(sentences, context, answer["answer_start"])
+                    if at is None or answer["text"] not in sentences[at]:
+                        counts["drop_sentence"] += 1
+                        continue
+                    chosen = [at]
+                    if qa["question_type"] == 2:      # 여러 문장 추론 : 질문과 가장 닮은 다른 문장 하나를 더한다
+                        if index is None:
+                            index = BM25(sentences)
+                        chosen += [i for i in index.rank(qa["question"]) if i != at][:1]
+                    evidence = join_within([sentences[i] for i in sorted(chosen)]) or sentences[at]
+                    if not text_ok(evidence):
+                        counts["drop_evidence"] += 1
+                        continue
+                    by_group[gid].append({
+                        "guid": guid, "question": " ".join(qa["question"].split()), "answer": answer["text"],
+                        "alt": alt, "kind": kind, "evidence": evidence, "split": allowed[guid],
+                        "qtype": qa["question_type"], "alt_in_evidence": alt in evidence,
+                    })
+    rows = []
+    for gid in sorted(by_group):
+        items = by_group[gid]
+        rng.shuffle(items)
+        counts["drop_cap"] += max(0, len(items) - cap)
+        for item in sorted(items[:cap], key=lambda x: x["guid"]):
+            for hint, fill, form in (("b", item["alt"], "qa-alt"), ("a", item["answer"], "qa-true")):
+                rows.append({
+                    "id": f"klue-ans-{len(rows) + 1:06d}", "evidence": item["evidence"], "claim": item["question"],
+                    "want": "", "hint": hint, "form": form, "domain": "klue-answered", "group": gid, "groups": [gid],
+                    "lang": "ko", "lic": "CC-BY-SA-4.0", "split": item["split"], "src_ids": [item["guid"]],
+                    "origin": "g3-klue", "needs_rewrite": True, "question": item["question"],
+                    "answer": item["answer"], "alt_answer": item["alt"], "fill": fill, "ans_type": item["kind"],
+                    "qtype": item["qtype"], "alt_in_evidence": item["alt_in_evidence"], "pair": item["guid"],
+                })
+    questions = [r for r in rows if r["hint"] == "b"]
+    summary = {
+        "source": "klue-answered", "rows": len(rows), "questions": len(questions),
+        "groups": len({r["group"] for r in rows}), "cap_per_group": cap,
+        "by_type": dict(sorted(collections.Counter(r["ans_type"] for r in questions).items())),
+        "by_split": dict(sorted(collections.Counter(r["split"] for r in questions).items())),
+        "alt_in_evidence": sum(r["alt_in_evidence"] for r in questions),
+        "forbid": {"groups": len(forbid_groups), "guids": len(forbid_guids)},
+        "counts": dict(sorted(counts.items())),
+    }
+    return rows, summary
+
+
+def run_klue_answered(raw, cands_path, forbid_paths, out_path, rng):
+    rows, summary = mine_klue_answered(raw, cands_path, forbid_paths, rng)
+    write_jsonl(out_path, rows)
+    with open(os.path.splitext(out_path)[0] + ".summary.json", "w", encoding="utf-8", newline="\n") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=1)
+    return summary
+
+
 MINERS = {
     "proposals": mine_proposals,
     "vitaminc": mine_vitaminc,
@@ -880,17 +1326,34 @@ MINERS = {
     "minicheck": mine_minicheck,
     "ood": mine_ood,
     "jira": mine_jira,
+    "vitaminc-heldout": lambda raw, rng: mine_vitaminc_g2(raw, rng, "heldout"),
+    "vitaminc-train": lambda raw, rng: mine_vitaminc_g2(raw, rng, "train"),
 }
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="공개 원천 열쇠 묶음 · 후보 쌍 뽑기")
-    parser.add_argument("source", choices=sorted(MINERS))
+    parser.add_argument("source", choices=sorted(MINERS) + ["kobest-boolq", "klue-answered"])
     parser.add_argument("--raw", required=True, help="원천 폴더 (ood 는 raw 뿌리)")
-    parser.add_argument("--out", required=True, help="후보를 쓸 뿌리 (원천 이름 폴더가 생긴다)")
+    parser.add_argument("--out", required=True,
+                        help="후보를 쓸 뿌리 (원천 이름 폴더가 생긴다) · kobest-boolq 는 그 폴더에 split 별 jsonl · "
+                             "klue-answered 는 jsonl 경로")
+    parser.add_argument("--cands", help="klue-answered : g1 klue-mrc candidates.jsonl")
+    parser.add_argument("--forbid", nargs="*", default=[],
+                        help="klue-answered : g1 · g2 가 쓴 KLUE 묶음 · 줄을 뽑아 뺄 파일 · 폴더")
     parser.add_argument("--seed", type=int, default=SEED)
     args = parser.parse_args(argv)
     rng = random.Random(args.seed)
+    if args.source == "kobest-boolq":
+        summary = run_kobest_boolq(args.raw, args.out)
+        print(json.dumps(summary, ensure_ascii=False, indent=1))
+        return 0
+    if args.source == "klue-answered":
+        if not args.cands:
+            parser.error("klue-answered 는 --cands 가 있어야 한다")
+        summary = run_klue_answered(args.raw, args.cands, args.forbid, args.out, rng)
+        print(json.dumps(summary, ensure_ascii=False, indent=1))
+        return 0
     collector = MINERS[args.source](args.raw, rng)
     summary = collector.write(args.out)
     print(json.dumps(summary, ensure_ascii=False, indent=1))

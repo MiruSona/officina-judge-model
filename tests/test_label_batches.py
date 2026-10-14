@@ -237,7 +237,7 @@ class AssembleTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def make_dir(self, kind, cands_rows, decided, trap_map=(), pool=()):
+    def make_dir(self, kind, cands_rows, decided, trap_map=(), pool=(), guide=None):
         parent = os.path.join(self.root, kind)
         out = os.path.join(parent, "dev-cal")
         cpath = os.path.join(parent, "dev-cal-cands.jsonl")
@@ -247,7 +247,10 @@ class AssembleTest(unittest.TestCase):
         mapping = [{"q": d["q"], "batch": "b01", "id": d["id"], "trap": False} for d in decided]
         mapping += [{"q": q, "batch": "b01", "id": tid, "trap": True, "gold": "a"} for q, tid in trap_map]
         write_jsonl(os.path.join(out, "map", "map.jsonl"), mapping)
-        lb.write_json(os.path.join(out, "map", "manifest.json"), {"cands": cpath, "traps": pool_path, "mode": "eval"})
+        man = {"cands": cpath, "traps": pool_path, "mode": "eval"}
+        if guide:
+            man["guide"] = guide
+        lb.write_json(os.path.join(out, "map", "manifest.json"), man)
         write_jsonl(os.path.join(out, "decided.jsonl"), decided)
         write_jsonl(os.path.join(out, "votes.jsonl"),
                     [{"q": d["q"], "id": d["id"], "votes": d["votes"]} for d in decided])
@@ -353,6 +356,47 @@ class AssembleTest(unittest.TestCase):
         pub2 = self.make_dir("eval-public2", pc, pd)
         with self.assertRaises(lb.AssembleStop):
             lb.assemble([pub2], "dev-cal", dedupe=True)
+
+    def test_guide_label_from_manifest(self):
+        # 판의 기준 문서 이름에서 support-vN 을 뽑는다. 이름에 없거나 guide 가 없으면 옛 기본 support-v5
+        self.assertEqual(lb.guide_label(os.path.join("Docs", "Guide", "라벨기준support-v6.md")), "support-v6")
+        self.assertEqual(lb.guide_label("다른기준.md"), "support-v5")
+        self.assertEqual(lb.guide_label(None), "support-v5")
+        pc, pd = self.public()
+        pub = self.make_dir("eval-public", pc, pd, guide="/x/라벨기준support-v6.md")
+        rows, summary = lb.assemble([pub], "dev-cal")
+        self.assertEqual({r["label_guide"] for r in rows}, {"support-v6"})
+        self.assertEqual(summary["label_guide"], "support-v6")
+
+    def test_mixed_guides_stop(self):
+        pc, pd = self.public()
+        pub = self.make_dir("eval-public", pc, pd, guide="/x/라벨기준support-v6.md")
+        ac, ad = self.archive()
+        arc = self.make_dir("eval-archive", ac, ad, guide="/x/라벨기준support-v5.md")
+        with self.assertRaises(lb.AssembleStop):
+            lb.assemble([pub, arc], "dev-cal")
+
+    def test_mixed_guides_allowed(self):
+        # --allow-mixed-guide : 줄마다 제 기준을 남기고 summary 에 기준별 수 (archive 는 drop 하나 빼고 넷)
+        pc, pd = self.public()
+        pub = self.make_dir("eval-public", pc, pd, guide="/x/라벨기준support-v6.md")
+        ac, ad = self.archive()
+        arc = self.make_dir("eval-archive", ac, ad, guide="/x/라벨기준support-v5.md")
+        lb.main(["assemble", "--set", "dev-cal", "--dirs", pub, arc, "--dest", self.dest, "--allow-git",
+                 "--allow-mixed-guide"])
+        rows = read_jsonl(os.path.join(self.dest, "dev-cal.jsonl"))
+        with open(os.path.join(self.dest, "dev-cal.summary.json"), encoding="utf-8") as f:
+            summary = json.load(f)
+        self.assertEqual({r["label_guide"] for r in rows}, {"support-v5", "support-v6"})
+        self.assertEqual(summary["label_guide"], "mixed")
+        self.assertEqual(summary["label_guides"], {"support-v5": 4, "support-v6": len(rows) - 4})
+
+    def test_single_guide_counts(self):
+        pc, pd = self.public()
+        pub = self.make_dir("eval-public", pc, pd, guide="/x/라벨기준support-v6.md")
+        rows, summary = lb.assemble([pub], "dev-cal", allow_mixed_guide=True)
+        self.assertEqual(summary["label_guide"], "support-v6")
+        self.assertEqual(summary["label_guides"], {"support-v6": len(rows)})
 
     def test_cd_stops(self):
         pc, pd = self.public()
@@ -574,6 +618,22 @@ class GoldTest(unittest.TestCase):
             res = json.loads(buf.getvalue().splitlines()[0])
             self.assertEqual(res["n"], 2)
             self.assertEqual(res["all"], 0.5)
+
+    def test_gold_score_dev_from_cands(self):
+        with tempfile.TemporaryDirectory() as root:
+            cands = os.path.join(root, "gold-cands.jsonl")
+            write_jsonl(cands, [{"id": f"k{i}", "dev_label": "b", "why": "random"} for i in range(4)])
+            write_jsonl(os.path.join(root, "decided.jsonl"),
+                        [{"id": "k0", "label": "b"}, {"id": "k1", "label": "b"}, {"id": "k2", "label": "d"},
+                         {"id": "k3", "label": None}])
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                lb.main(["gold-score", "--dev-from", cands, "--gold", root])
+            res = json.loads(buf.getvalue().splitlines()[0])
+            self.assertEqual((res["n"], res["all"], res["gate_on"]), (3, round(2 / 3, 4), "random"))
+            self.assertFalse(res["pass"])
+            with self.assertRaises(SystemExit):   # --out · --dev-from 둘 다 주면 멈춘다
+                lb.main(["gold-score", "--out", root, "--dev-from", cands, "--gold", root])
 
     def test_review_order_and_train_sample(self):
         decided = [{"q": f"q{i}", "id": f"x{i}", "label": "d", "status": "third"} for i in range(80)]

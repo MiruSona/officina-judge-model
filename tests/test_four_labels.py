@@ -35,6 +35,12 @@ def protocol_gate():
 
 
 CRIT4 = prereg.criteria_from_gate(protocol_gate())
+PROTOCOL_G2 = os.path.join(os.path.dirname(prereg.DEFAULT_PROTOCOL), "protocol-g2.json")
+
+
+def protocol_gate_g2():
+    with open(PROTOCOL_G2, encoding="utf-8") as f:
+        return json.load(f)["release_gate"]
 
 
 def logits_for(probs):
@@ -438,6 +444,70 @@ class PreregFourTest(unittest.TestCase):
         del gate["d_recall_min"]
         with self.assertRaises(SystemExit):
             prereg.criteria_from_gate(gate)
+
+    def test_g2_gate_criteria(self):
+        # g2 규약 : 절대 자는 b 재현 · 확신 거짓 지지 · p95 만, 나머지는 기준 모델 대비 (vs_ref · 보류 차)
+        gate = protocol_gate_g2()
+        c = prereg.criteria_from_gate(gate)
+        self.assertEqual(c, {"contradict_recall_min": gate["b_recall_min"],
+                             "false_support_share_max": gate["sure_false_support_share_max"],
+                             "unsure_vs_ref_max_diff": gate["unsure_vs_ref_max_diff"],
+                             "vs_ref": gate["vs_ref"], "ref_model": gate["ref_model"],
+                             "p95_ms_max": gate["p95_ms_max"]})
+        self.assertNotIn("accuracy3_min", c)
+        self.assertNotIn("unsure_max", c)
+
+    def test_g2_gate_missing_field_stops(self):
+        gate = protocol_gate_g2()
+        del gate["unsure_vs_ref_max_diff"]
+        with self.assertRaises(SystemExit):
+            prereg.criteria_from_gate(gate)
+
+    def test_g2_build_records_protocol(self):
+        gate = protocol_gate_g2()
+        got = prereg.build(self.four_spec(), {}, set(), set(), {"release_gate": gate}, PROTOCOL_G2, "e" * 64)
+        self.assertEqual(got["criteria"]["vs_ref"][0], {"metric": "b_recall", "ci_low_gt": 0.0})
+        self.assertEqual(got["release_gate"], gate)
+        self.assertEqual((got["protocol_file"], got["protocol_sha256"]), ("protocol-g2.json", "e" * 64))
+        self.assertEqual(got["next"], prereg.NEXT_G2)
+
+    def test_g3_protocol_next_is_k_round(self):
+        got = prereg.build(self.four_spec(), {}, set(), set(), {"release_gate": protocol_gate_g2()},
+                           "/x/protocol-g3.json", "e" * 64)
+        self.assertEqual(got["next"], prereg.NEXT_G3)
+        self.assertNotEqual(got["next"], prereg.NEXT_G2)
+
+    def test_unknown_vs_ref_protocol_needs_next(self):
+        gate = {"release_gate": protocol_gate_g2()}
+        with self.assertRaises(SystemExit):
+            prereg.build(self.four_spec(), {}, set(), set(), gate, "/x/protocol-g9.json", "e" * 64)
+        mine = {"fail": "따로 정한 문구"}
+        got = prereg.build(self.four_spec(), {}, set(), set(), gate, "/x/protocol-g9.json", "e" * 64, mine)
+        self.assertEqual(got["next"], mine)
+
+    def test_main_next_file_wins(self):
+        mine = {"pass": "가", "fail": "나"}
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "model.json"), "w", encoding="utf-8") as f:
+                json.dump(self.four_spec(), f)
+            nxt = os.path.join(tmp, "next.json")
+            with open(nxt, "w", encoding="utf-8") as f:
+                json.dump(mine, f, ensure_ascii=False)
+            out = os.path.join(tmp, "prereg.json")
+            with mock.patch("sys.stdout"):
+                prereg.main(["--model-dir", tmp, "--set", f"m={os.path.join(tmp, 'model.json')}", "--out", out,
+                             "--protocol", PROTOCOL_G2, "--next", nxt])
+            with open(out, encoding="utf-8") as f:
+                got = json.load(f)
+        self.assertEqual(got["next"], mine)
+
+    def test_g1_criteria_unchanged(self):
+        # g1 회귀 : 칸 일곱 그대로 · 다음 걸음은 NEXT_V2
+        self.assertEqual(set(CRIT4), {"accuracy3_min", "contradict_recall_min", "false_support_share_max",
+                                      "unsure_max", "related_recall_min", "related_sure_precision_min", "p95_ms_max"})
+        got = prereg.build(self.four_spec(), {}, set(), set(), {"release_gate": protocol_gate()},
+                           "/x/protocol-g1.json", "f" * 64)
+        self.assertEqual(got["next"], prereg.NEXT_V2)
 
     def test_main_writes_default_protocol_gate(self):
         with tempfile.TemporaryDirectory() as tmp:

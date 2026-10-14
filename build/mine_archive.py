@@ -7,9 +7,12 @@
     python -I mine_archive.py git  --repo studio=<저장소> --out <build>/g1 --names <목록> --game-names <목록>
     python -I mine_archive.py docs --root studio=<저장소> --out <build>/g1 --names … --game-names …
     python -I mine_archive.py mem  --store studio=<Memory/store> --dev-r2 <dev-r2.jsonl> --old-root ~/.judgemodel --out <build>/g1
+    python -I mine_archive.py revision  --repo studio=<저장소> … --out <build>/g2 --names … --game-names …   # v1.2 B 판
+    python -I mine_archive.py supersede --store studio=<Memory/store> … --old-root ~/.judgemodel --forbid <파일> … --out <build>/g2
 """
 import argparse
 import collections
+import difflib
 import glob
 import json
 import os
@@ -129,21 +132,23 @@ def units_of(raw):
 class ArchiveCollector(mp.Collector):
     """mine_public.Collector 와 같은 꼴 · 상한으로 쓰되 거르기만 아카이브용으로 바꾼다."""
 
-    def __init__(self, source, domain, origin="g1-ga"):
+    def __init__(self, source, domain, origin="g1-ga", cap=mp.PER_GROUP_CAP):
         super().__init__(source)
         self.domain = domain
         self.origin = origin
+        self.cap = cap
+        self.text_ok = arch_text_ok
 
     def add(self, evidence, claim, hint, form, groups, lang, split, src_ids, lic="", needs_rewrite=False, **extra):
         key = (groups[0], hint, form)
-        if self.per_cap[key] >= mp.PER_GROUP_CAP:
+        if self.per_cap[key] >= self.cap:
             return False
         evidence = " ".join(evidence.split())
         claim = " ".join(claim.split())
-        if not arch_text_ok(evidence):
+        if not self.text_ok(evidence):
             self.dropped["evidence"] += 1
             return False
-        if not arch_text_ok(claim):
+        if not self.text_ok(claim):
             self.dropped["claim"] += 1
             return False
         if make_sets.norm(evidence) == make_sets.norm(claim):
@@ -604,19 +609,190 @@ def _mem_between(col, mems, fresh, group_of, rng):
                 col.add(text, items[j][1], "d", "near", [group_of[mid], group_of[other]], "", "any", [mid, other])
 
 
+# ---------------------------------------------------------------- revision (v1.2 B 판 · 문서 한 줄 고침)
+#
+# git log -p 에서 md 문서의 「한 줄 지우고 한 줄 넣은」 고침(-1 +1)만 쌍으로 뽑는다. 설계 v1.2-B판 3-2 · 5-1 D.
+# 근거 = 고친 뒤 줄 · 주장 = 고치기 전 줄 (옛 글을 지금 사실에 대 보는 꼴). hint 는 b 지만 라벨은 판정이 정한다.
+
+REV_MIN_LEN = 15              # 한쪽이라도 이보다 짧으면 버림 (count_diff.py 와 같은 값)
+REV_MIN_RATIO = 0.6           # 두 줄 글자 닮음 하한 (difflib) — 낮으면 다른 문장을 새로 쓴 것
+REV_MASS = 3                  # 같은 「옛 낱말 → 새 낱말」 바꿈이 이만큼 넘게 나오면 일괄 이름 바꾸기로 본다
+REV_GROUP_CAP = 40            # 한 문서 · 한 꼴에서 뽑는 상한 — 원천이 모자라 넉넉히. 평가 몫은 예약 때 다시 줄인다
+_REV_SKIP_DIRS = ("Memory", "Tools", ".claude", "node_modules")
+_REV_NUM = re.compile(r"\d+(?:[.,]\d+)?")
+_REV_TOKEN = re.compile(r"[A-Za-z0-9_./\\\-]+|[가-힣]+|\S")
+_REV_IDENT = re.compile(r"^[A-Za-z0-9_./\\\-]+$")
+
+
+def _rev_line(raw):
+    """고친 줄 하나 → 문장. 표 줄은 칸을 「 · 」로 잇고, 마크다운 꾸밈을 벗긴다."""
+    line = raw.strip()
+    if line.startswith("|"):
+        cells = [clean_inline(c) for c in line.strip("|").split("|")]
+        line = " · ".join(c for c in cells if c and not re.fullmatch(r":?-{2,}:?", c.replace(" ", "")))
+    return clean_inline(line)
+
+
+def read_revisions(repo_path):
+    """저장소 → [(커밋 앞 12자, 경로, 옛 줄, 새 줄)] — md 의 -1 +1 덩이만 (병합 커밋 뺌)."""
+    out = subprocess.run(["git", "-C", repo_path, "log", "-p", "--no-merges", "--no-color", "--unified=0",
+                          "--format=%x1e%H", "--", "*.md"],
+                         capture_output=True, text=True, encoding="utf-8", errors="replace", check=True).stdout
+    edits = []
+    for record in out.split("\x1e"):
+        lines = record.split("\n")
+        sha, path, minus, plus = lines[0].strip()[:12], "", [], []
+        for line in lines[1:] + ["@@"]:
+            if line.startswith("diff --git") or line.startswith("@@"):
+                if path and len(minus) == 1 and len(plus) == 1:
+                    edits.append((sha, path, minus[0], plus[0]))
+                minus, plus = [], []
+                if line.startswith("diff --git"):
+                    path = ""
+                continue
+            if line.startswith("+++ "):
+                target = line[4:].strip()
+                path = target[2:] if target.startswith("b/") else ""
+            elif line.startswith("--- "):
+                continue
+            elif line.startswith("-"):
+                minus.append(line[1:])
+            elif line.startswith("+"):
+                plus.append(line[1:])
+    return edits
+
+
+def _changed_tokens(old, new):
+    """두 줄에서 바뀐 낱말 (지운 쪽 · 넣은 쪽) — 낱말은 영문 식별자 · 한글 덩이 · 기호 하나."""
+    a, b = _REV_TOKEN.findall(old), _REV_TOKEN.findall(new)
+    removed, added = [], []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if tag != "equal":
+            removed.append(" ".join(a[i1:i2]))
+            added.append(" ".join(b[j1:j2]))
+    return removed, added
+
+
+def is_rename(old, new, mass_pairs=frozenset()):
+    """이름 바꾸기(경로 · 툴 이름 고침)면 True — 사실이 바뀐 게 아니라 이름만 바뀐 고침이라 b 후보에서 뺀다.
+
+    규칙 : 수는 그대로이고, 바뀐 낱말이 모두 영문 식별자 꼴이며, 다음 둘 중 하나.
+      ① 바뀐 낱말에 경로 표지(/ \\ 또는 .md 같은 확장자)가 있다.
+      ② 같은 「옛 → 새」 바꿈이 저장소 전체에서 REV_MASS 번 넘게 나온다(일괄 이름 바꾸기, mass_pairs).
+    Handler → Util 처럼 한 번만 나온 식별자 바꿈은 사실 바뀜(b)일 수 있어 남긴다.
+    """
+    if sorted(_REV_NUM.findall(old)) != sorted(_REV_NUM.findall(new)):
+        return False
+    removed, added = _changed_tokens(old, new)
+    tokens = [t for t in removed + added if t]
+    if not tokens or not all(_REV_IDENT.match(t.replace(" ", "")) for t in tokens):
+        return False
+    if any(re.search(r"[/\\]|\.[A-Za-z]{1,4}$", t) for t in tokens):
+        return True
+    return any((r, a) in mass_pairs for r, a in zip(removed, added))
+
+
+def rev_text_ok(text):
+    """한 줄 고침용 거르기 — arch_text_ok 에서 「목록 · 메뉴」 버림만 뺀다. 표 줄의 수 고침이 주된 b 라서다."""
+    text = (text or "").strip()
+    if not mp.MIN_LEN <= len(text) <= mp.MAX_LEN or mp._URL.search(text) or text.endswith(":"):
+        return False
+    if sum(ch.isalpha() for ch in text) < 0.5 * len(text.replace(" ", "")):
+        return False
+    return sum(text.count(m) for m in ("{", "}", ";", "==", "=>", "()", "$", "::", "</")) <= 2
+
+
+def mine_revision(repos, rng, name="ko-revision", domain="archive", lic="", origin="g2-rev"):
+    """name · domain · lic · origin 은 바깥 저장소(v1.2 K 판 MIT 저장소 : mit · mit-cs · MIT · g3-mit)를 돌 때 바꾼다."""
+    col = ArchiveCollector(name, domain, origin=origin, cap=REV_GROUP_CAP)
+    col.text_ok = rev_text_ok
+    edits = []
+    for label, path in repos:
+        for sha, rel, old_raw, new_raw in read_revisions(path):
+            parts = rel.split("/")
+            if any(p in _REV_SKIP_DIRS for p in parts) or rel.endswith(".local.md"):
+                col.dropped["skip_dir"] += 1
+                continue
+            old, new = _rev_line(old_raw), _rev_line(new_raw)
+            if len(old) < REV_MIN_LEN or len(new) < REV_MIN_LEN or old == new:
+                col.dropped["short_or_same"] += 1
+                continue
+            if difflib.SequenceMatcher(None, old, new, autojunk=False).ratio() < REV_MIN_RATIO:
+                col.dropped["not_similar"] += 1
+                continue
+            edits.append((label, sha, rel, old, new))
+    swaps = collections.Counter()
+    for _, _, _, old, new in edits:
+        removed, added = _changed_tokens(old, new)
+        swaps.update(set(zip(removed, added)))
+    mass = frozenset(pair for pair, n in swaps.items() if n > REV_MASS)
+    per_commit = collections.Counter((label, sha) for label, sha, _, _, _ in edits)
+    rng.shuffle(edits)
+    for label, sha, rel, old, new in edits:
+        if is_rename(old, new, mass):
+            col.dropped["rename"] += 1
+            continue
+        gid = col.group(f"doc:{label}:{rel}", "any", title=rel)
+        num_change = sorted(_REV_NUM.findall(old)) != sorted(_REV_NUM.findall(new))
+        # 출처 id 둘째 칸 = 커밋 + 바뀐 낱말 : 한 커밋이 여러 문서에서 같은 값을 고친 쌍끼리만 이어지게 한다
+        change = mp.short_hash(json.dumps(_changed_tokens(old, new), ensure_ascii=False), 8)
+        col.add(new, old, "b", "num-change" if num_change else "edit", [gid], "", "any",
+                [f"{label}:{rel}", f"{label}:{sha}:{change}"], lic=lic, num_change=num_change,
+                commit_edits=per_commit[(label, sha)])
+    return col
+
+
+# ---------------------------------------------------------------- supersede (v1.2 B 판 · 덮은 결정)
+
+def mine_supersede(stores, forbid_ids, rng):
+    """덮은 기억 짝(superseded_by) → 근거 = 새 기억 · 주장 = 옛 기억. 요약끼리 · 제목끼리 두 쌍.
+
+    g1 mem 모드와 달리 「새 기억끼리」 조건이 없다. forbid_ids(잣대 기억 등)에 든 기억만 여기서 뺀다 —
+    옛 셋에 쓴 기억은 평가 몫엔 못 쓰고 학습 층엔 쓸 수 있어 make_sets.py reserve-g2 가 가른다.
+    """
+    col = ArchiveCollector("ko-supersede", "mem", origin="g2-sup")
+    col.text_ok = rev_text_ok
+    mems = {}
+    for label, path in stores:
+        mems.update(read_mem_store(path, label))
+    group_of = mem_groups(mems)
+    for old_id in sorted(mems):
+        new_id = mems[old_id]["superseded_by"]
+        if new_id not in mems:
+            continue
+        if old_id in forbid_ids or new_id in forbid_ids:
+            col.dropped["forbidden"] += 1
+            continue
+        old, new = mems[old_id], mems[new_id]
+        gid = col.group(group_of[old_id], "any")
+        reversed_ = any(_REVERSAL.search(u) for _, u in _mem_units(new))
+        hint = "b" if reversed_ else "d"
+        for kind in ("summary", "title"):
+            if old[kind] and new[kind]:
+                col.add(new[kind], old[kind], hint, "supersede-" + kind, [gid], "", "any", [old_id, new_id])
+    return col
+
+
 # ---------------------------------------------------------------- main
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="아카이브 · mem 열쇠 묶음 · 후보 쌍 뽑기")
-    parser.add_argument("source", choices=("git", "docs", "mem"))
-    parser.add_argument("--out", required=True, help="후보 뿌리 (<out>/archive/<git|docs> · <out>/mem 이 생긴다)")
-    parser.add_argument("--repo", action="append", default=[], help="git : 이름=저장소 경로 (여러 번)")
+    parser.add_argument("source", choices=("git", "docs", "mem", "revision", "supersede"))
+    parser.add_argument("--out", required=True,
+                        help="후보 뿌리 (<out>/archive/<git|docs> · <out>/mem · <out>/ko-revision · <out>/ko-supersede)")
+    parser.add_argument("--repo", action="append", default=[], help="git · revision : 이름=저장소 경로 (여러 번)")
     parser.add_argument("--root", action="append", default=[], help="docs : 이름=저장소 뿌리 (여러 번)")
-    parser.add_argument("--store", action="append", default=[], help="mem : 이름=Memory/store 경로 (여러 번)")
+    parser.add_argument("--store", action="append", default=[], help="mem · supersede : 이름=Memory/store 경로 (여러 번)")
+    parser.add_argument("--forbid", nargs="*", default=[],
+                        help="supersede : 기억 id 를 뽑아 뺄 파일 (g1 셋 · 잣대 기억 목록 등)")
     parser.add_argument("--dev-r2", help="mem : 다시 붙일 dev-r2 파일")
     parser.add_argument("--old-root", help="mem : 옛 셋 뿌리 (make_sets.OLD_SETS 의 기억 id 를 뺀다)")
     parser.add_argument("--names", nargs="*", default=[], help="버릴 이름 목록 파일 (git 밖)")
     parser.add_argument("--game-names", nargs="*", default=[], help="<게임> 으로 바꿀 이름 목록 파일 (git 밖)")
+    parser.add_argument("--name", default="ko-revision", help="revision : 원천 이름 = 출력 폴더 (MIT 저장소는 mit)")
+    parser.add_argument("--domain", default="archive", help="revision : 줄의 domain (MIT 저장소는 mit-cs)")
+    parser.add_argument("--lic", default="", help="revision : 줄의 lic (MIT 저장소는 MIT)")
+    parser.add_argument("--origin", default="g2-rev", help="revision : 줄의 origin (MIT 저장소는 g3-mit)")
     parser.add_argument("--seed", type=int, default=SEED)
     args = parser.parse_args(argv)
     rng = random.Random(args.seed)
@@ -624,6 +800,14 @@ def main(argv=None):
         col, out_root = mine_git(_labelled(args.repo), rng), os.path.join(args.out, "archive")
     elif args.source == "docs":
         col, out_root = mine_docs(_labelled(args.root), rng), os.path.join(args.out, "archive")
+    elif args.source == "revision":
+        col, out_root = mine_revision(_labelled(args.repo), rng, args.name, args.domain, args.lic, args.origin), args.out
+    elif args.source == "supersede":
+        forbid = set(make_sets.load_old(args.old_root)[1]) if args.old_root else set()
+        for path in args.forbid:
+            with open(path, encoding="utf-8") as f:
+                forbid.update(_MEM_ID.findall(f.read()))
+        col, out_root = mine_supersede(_labelled(args.store), forbid, rng), args.out
     else:
         old_ids = make_sets.load_old(args.old_root)[1] if args.old_root else set()
         col, out_root = mine_mem(_labelled(args.store), args.dev_r2, old_ids, rng), args.out

@@ -1,5 +1,11 @@
 """measure — 모델 표 · 사다리 표 · 자 판정 셈."""
+import contextlib
+import io
+import json
+import os
+import tempfile
 import unittest
+from unittest import mock
 
 import helpers  # noqa: F401
 
@@ -63,6 +69,20 @@ class VerdictTest(unittest.TestCase):
     def test_false_support_fails(self):
         v = rm.verdict(prereg.CRITERIA, self.model, {"false_support": 4, "unsure_rate": 0.1}, 500.0)
         self.assertEqual(v["next"], "fail")
+
+
+class ReleaseGatePreregTest(unittest.TestCase):
+    def test_vs_ref_prereg_refused_before_server(self):
+        # g2 · g3 규약 prereg 는 옛 판정 길을 안 탄다 — 서버를 부르기 전에 exit 2
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prereg.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"criteria": {"vs_ref": [{"metric": "b_recall", "ci_low_gt": 0.0}]}, "sets": {}}, f)
+            with mock.patch.object(rm, "measure_set") as measure, contextlib.redirect_stderr(io.StringIO()) as err:
+                code = rm.main(["--prereg", path, "--set", "blind=x.jsonl", "--out-dir", tmp])
+        self.assertEqual(code, 2)
+        measure.assert_not_called()
+        self.assertIn("gates.py release", err.getvalue())
 
 
 class PreregTest(unittest.TestCase):
