@@ -647,6 +647,46 @@ class G7ProtocolTest(unittest.TestCase):
             self.assertEqual(cc["ack"]["sha256"], hashlib.sha256(f.read()).hexdigest())
 
 
+PROTOCOL_G7_FROZEN = os.path.join(helpers.ROOT, "measure", "protocol-g7.json")
+PROTOCOL_G8_DRAFT = os.path.join(helpers.ROOT, "measure", "protocol-g8.draft.json")
+PROTOCOL_G8_FROZEN = os.path.join(helpers.ROOT, "measure", "protocol-g8.json")
+
+
+class G8ProtocolTest(unittest.TestCase):
+    """protocol-g8 — g7 에서 바뀌는 칸은 K6 설계 6-1 표뿐 (자는 g7 그대로)."""
+
+    def test_draft_and_frozen_same_rulers_as_g7(self):
+        g7, _ = cmp.read_protocol(PROTOCOL_G7_FROZEN)
+        for path in (PROTOCOL_G8_DRAFT, PROTOCOL_G8_FROZEN):
+            g8, _ = cmp.read_protocol(path)
+            for key in ("sets", "compare_on", "calibrate_on", "release_pick", "bootstrap", "seeds", "majority", "release_gate",
+                        "side", "group_key", "label_guide", "report_only_sets", "seed_rerun", "ckpt"):
+                self.assertEqual(g8[key], g7[key], key)
+            for key in ("target", "guards", "alarms", "alarms_note", "slice_note", "base"):
+                self.assertEqual(g8["pair_gate"][key], g7["pair_gate"][key], key)
+            self.assertEqual((g8["name"], g8["pair_gate"]["new"]), ("protocol-g8", "K6"))
+            self.assertEqual(g8["pair_gate"]["report_only"][:len(g7["pair_gate"]["report_only"])], g7["pair_gate"]["report_only"])
+            self.assertIn("K5 → K6", " ".join(g8["pair_gate"]["report_only"]))
+            self.assertIn("K6 설계 2절", g8["pair_gate"]["verdicts"]["지킴 깨짐"])
+            cc7, cc8 = g7["cell_check"], g8["cell_check"]
+            self.assertEqual(cc8["recipe"], [n if n != "train-g4-bal" else "train-g4-bal2" for n in cc7["recipe"]])
+            self.assertEqual({k: v for k, v in cc8.items() if k != "recipe"}, {k: v for k, v in cc7.items() if k != "recipe"})
+        g8, _ = cmp.read_protocol(PROTOCOL_G8_DRAFT)
+        self.assertEqual(g8["train_sets"], dict(g7["train_sets"], **{"train-g4-bal2": ""}))
+        frozen, _ = cmp.read_protocol(PROTOCOL_G8_FROZEN)
+        self.assertEqual(set(frozen["train_sets"]), set(g7["train_sets"]) | {"train-g4-bal2"})
+        self.assertEqual({k: v for k, v in frozen["train_sets"].items() if k != "train-g4-bal2"}, g7["train_sets"])
+        self.assertRegex(frozen["train_sets"]["train-g4-bal2"], "^[0-9a-f]{64}$")
+
+    def test_frozen_is_draft_with_one_slot_filled(self):
+        with open(PROTOCOL_G8_DRAFT, encoding="utf-8") as f:
+            draft = f.read()
+        with open(PROTOCOL_G8_FROZEN, encoding="utf-8") as f:
+            frozen = f.read()
+        digest = json.loads(frozen)["train_sets"]["train-g4-bal2"]
+        self.assertEqual(draft.replace('"train-g4-bal2": ""', f'"train-g4-bal2": "{digest}"'), frozen)
+
+
 class G6AlarmTest(unittest.TestCase):
     """protocol-g6 초안 — 새 경보 둘 「너무 오름」(recalls · max_mean_diff) · 「원천별 쏠림」(pred_shift) (원천 균형 판 설계 5-4 · 5-6)."""
 

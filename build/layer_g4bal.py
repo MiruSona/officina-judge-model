@@ -13,6 +13,8 @@
     python -I layer_g4bal.py pick-klb  --g4 …   → <g4>/train-g4-klb/pick-ka.jsonl · pick-mrc.jsonl · pick-summary.json   (K5 4-3)
     python -I layer_g4bal.py build-klb --g4 … [--cands …] [--dirs <g4>/klb/judge]
     → <g4>/train-g4-klb/cands.jsonl · summary.json   (K5 4-2 조성 — compose_klb)
+    python -I layer_g4bal.py thin-mrc-d [--layer <sets/g4/train-g4-bal.jsonl>] [--frozen …] [--klb …] [--keep 120]
+    → <g4>/train-g4-bal2/cands.jsonl · summary.json   (K6 3-1 · 3-3 — klue-mrc d 줄이기, 남은 줄은 바이트 그대로)
 
 조립 규칙 (1-1) : 재료 차례는 v6 → v5(실물만) → 새 판정. 원천 × 칸 목표(TARGETS build)를 넘지 않는다.
   짝 꼴(form contrast · seed-*)은 같은 `pair` 줄을 한 묶음으로 몫 안에 다 들 때만 통째로 넣고(깨진 짝 = 한 줄 묶음은 뺀다),
@@ -32,11 +34,13 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "train"))   # freeze.read_frozen (뒤에 붙여 build 이름이 이긴다)
 
 import layer_g4d as ld  # noqa: E402
 import public_pick  # noqa: E402
 from assemble_g3 import Stop, judge_label, load_decisions, resolve  # noqa: E402
-from assemble_g4 import CELL_OF  # noqa: E402
+from assemble_g4 import CELL_OF, cell_key  # noqa: E402
+from freeze import read_frozen  # noqa: E402
 from label_batches import inside_git, load_map, read_jsonl, write_json, write_jsonl  # noqa: E402
 from layer_g3 import merge_targets, recheck  # noqa: E402
 from layer_g4c import _drop_boundary, _refuse_or_move, _targets, make_guard  # noqa: E402
@@ -46,6 +50,8 @@ SEED = 20261404
 KLB_SEED = 20261505            # build-klb 조성 씨앗
 LAYER = "train-g4-bal"
 KLB_LAYER = "train-g4-klb"     # K5 설계 4-3 — pick-klb 출력 폴더
+THIN_SEED = 20261506           # thin-mrc-d 씨앗 (K6 설계 3-3)
+BAL2_LAYER = "train-g4-bal2"   # K6 설계 3-2 — thin-mrc-d 출력 폴더
 CELLS = ("a", "b", "c", "d")
 SKIP_DOMAINS = ("jira", "minicheck")
 UNIT_FORMS = ("contrast",)          # 그 밖에 form 이 seed- 로 시작하는 줄도 짝 묶음이다
@@ -658,6 +664,104 @@ def compose_klb(cands, decisions, targets=None, seed=KLB_SEED):
     return rows, summary
 
 
+# ---------------------------------------------------------------- K6 train-g4-bal2 (K6 설계 3-1 · 3-3)
+
+
+THIN_RULE = "thin-mrc-d: keep mate_b → pair → band largest-remainder (K6 설계 3-1)"
+
+
+def _line_rows(data, name="입력"):
+    """bytes → [(원래 줄 bytes, 읽은 dict 또는 None)]. 빈 줄은 dict 없이 그대로 둔다. 꼴이 틀리면 Stop(name 은 오류 문구의 파일 이름)."""
+    out = []
+    for k, raw in enumerate(data.splitlines(keepends=True), start=1):
+        text = raw.strip()
+        if not text:
+            out.append((raw, None))
+            continue
+        try:
+            row = json.loads(text.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            raise Stop(f"{name} {k} 번째 줄이 JSON 이 아니다")
+        if not isinstance(row, dict):
+            raise Stop(f"{name} {k} 번째 줄이 JSON 객체가 아니다")
+        out.append((raw, row))
+    return out
+
+
+def _is_mrc(row, cell):
+    """klue-mrc 의 그 칸 줄인가 — 원천 · 칸 견주기는 assemble_g4.cell_key 하나로."""
+    return cell_key(row) == ("klue-mrc", cell)
+
+
+def _thin_target(row):
+    return row is not None and "_meta" not in row and row.get("origin") == "g4-train" and _is_mrc(row, "d")
+
+
+def _row_groups(row):
+    return {g for g in (row.get("groups") or [row.get("group")]) if g}
+
+
+def _largest_remainder(total, weights):
+    """total 을 weights 비로 나눈다 — 바닥 몫 뒤 남은 수를 소수 부분 큰 차례(같으면 앞 번호)로 하나씩."""
+    whole = sum(weights.values())
+    if not whole:
+        return {k: 0 for k in weights}
+    exact = {k: total * w / whole for k, w in weights.items()}
+    got = {k: int(math.floor(v)) for k, v in exact.items()}
+    for k in sorted(weights, key=lambda k: (-(exact[k] - got[k]), k))[:total - sum(got.values())]:
+        got[k] += 1
+    return got
+
+
+def thin_mrc_d(lines, klb_rows, keep, seed=None, edges=None):
+    """train-g4-bal 줄([(bytes, dict)]) → (남길 줄 bytes 목록, 요약). 대상 = klue-mrc d (origin g4-train).
+    남김 차례 : ① 같은 묶음에 klue-mrc b(이 층 + klb)가 있는 d ② `pair` 칸이 있는 d ③ 나머지를 겹침 구간별로
+    keep − (①+②) 을 대상 전체의 구간 수 비로 큰 나머지 몫 나눔 · 구간 안은 id 차례 정렬 뒤 씨앗으로 섞어 앞에서.
+    대상 밖 줄은 바이트 그대로 차례 그대로. 대상이 없거나 · keep 범위 밖 · id 겹침 · 구간 몫이 모자라면 Stop."""
+    seed = THIN_SEED if seed is None else seed
+    edges = list(TARGETS["edges"] if edges is None else edges)
+    rows = [r for _, r in lines if r is not None and "_meta" not in r]
+    ids = [r.get("id") for r in rows]
+    if any(not i for i in ids) or len(ids) != len(set(ids)):
+        raise Stop("id 가 비었거나 겹친다")
+    target = sorted((r for _, r in lines if _thin_target(r)), key=lambda r: r["id"])
+    if not target:
+        raise Stop("대상 줄(klue-mrc d · origin g4-train)이 없다")
+    if any(not (r.get("evidence") and r.get("claim")) for r in target):
+        raise Stop("대상 줄에 빈 근거 · 주장이 있다")
+    b_groups = set()
+    for row in rows + list(klb_rows):
+        if _is_mrc(row, "b"):
+            b_groups |= _row_groups(row)
+    stage, band = {}, {}
+    for row in target:
+        band[row["id"]] = ld.bin_of(ld.overlap(row["evidence"], row["claim"]), edges)
+        stage[row["id"]] = "mate_b" if _row_groups(row) & b_groups else "pair" if row.get("pair") else "band"
+    must = [r["id"] for r in target if stage[r["id"]] != "band"]
+    if not len(must) <= keep < len(target):
+        raise Stop(f"keep {keep} 가 범위 밖이다 — 짝 {len(must)} 이상 · 대상 {len(target)} 미만이어야 한다")
+    bands = sorted(set(band.values()) | set(range(len(edges) + 1)))
+    before = {b: sum(1 for r in target if band[r["id"]] == b) for b in bands}
+    quota = _largest_remainder(keep - len(must), before)
+    kept = set(must)
+    for b in bands:
+        pool = [r["id"] for r in target if stage[r["id"]] == "band" and band[r["id"]] == b]
+        if quota[b] > len(pool):
+            raise Stop(f"구간 {b} 몫 {quota[b]} 이 남은 줄 {len(pool)} 보다 많다 — keep 을 줄이거나 몫을 넘겨야 함")
+        random.Random(f"{seed}:thin-mrc-d:{b}").shuffle(pool)
+        kept.update(pool[:quota[b]])
+    out = [raw for raw, row in lines if not _thin_target(row) or row["id"] in kept]
+    removed = [r["id"] for r in target if r["id"] not in kept]
+    summary = {"rule": THIN_RULE, "seed": seed, "keep": keep, "edges": edges,
+               "target": len(target), "kept": len(kept), "removed_n": len(removed),
+               "stages": {s: sum(1 for r in target if stage[r["id"]] == s and r["id"] in kept) for s in ("mate_b", "pair", "band")},
+               "band_quota": {str(b): quota[b] for b in bands},
+               "bands_before": {str(b): before[b] for b in bands},
+               "bands_after": {str(b): sum(1 for r in target if band[r["id"]] == b and r["id"] in kept) for b in bands},
+               "rows_before": len(rows), "rows_after": len(rows) - len(removed), "removed": removed}
+    return out, summary
+
+
 # ---------------------------------------------------------------- 재료 준비 (v6 · v5 · 새 판정)
 
 
@@ -1146,6 +1250,70 @@ def cmd_build_klb(a):
     return 1 if sum(summary["recheck"].values()) or summary["taken"] else 0
 
 
+def _frozen_mismatch(path, frozen, digest):
+    """FROZEN-*.sha256(train/freeze.py read_frozen 으로 읽음)과 입력을 견준다 → 맞으면 "", 아니면 멈춤 문구.
+    파일 이름 칸이 입력 basename 과 같고 sha 가 같아야 맞다."""
+    try:
+        want, name = read_frozen(frozen)
+    except (SystemExit, ValueError):
+        return f"{os.path.basename(frozen)} 에 「sha 파일이름」 줄이 없다"
+    if name.strip() != os.path.basename(path):
+        return f"{os.path.basename(frozen)} 의 파일 이름({name.strip()})이 입력({os.path.basename(path)})과 다르다"
+    if want != digest:
+        return f"{os.path.basename(path)} sha 가 FROZEN 과 다르다"
+    return ""
+
+
+def cmd_thin(a):
+    """K6 train-g4-bal2 — 얼린 train-g4-bal 에서 klue-mrc d 를 keep 줄로 줄임 → <g4>/train-g4-bal2/cands.jsonl · summary.json.
+    klb 층도 FROZEN-<klb>.sha256 이 있으면 견준다(없으면 경고 한 줄 · summary klb_frozen null).
+    exit 2 = 파일 없음 · 입력(또는 klb) sha · 이름 ≠ FROZEN · 입력 꼴 · 대상 없음 · keep 범위 밖 · 출력이 이미 있음(--force 없이) · git 안."""
+    sets = os.path.join(os.path.expanduser(a.old_root), "sets", "g4")
+    layer = os.path.expanduser(a.layer or os.path.join(sets, f"{LAYER}.jsonl"))
+    frozen = os.path.expanduser(a.frozen or os.path.join(sets, f"FROZEN-{LAYER}.sha256"))
+    klb = os.path.expanduser(a.klb or os.path.join(sets, f"{KLB_LAYER}.jsonl"))
+    _, outs, code = _out(a, ("cands.jsonl", "summary.json"), BAL2_LAYER)
+    if code:
+        return code
+    missing = [p for p in (layer, frozen, klb) if not os.path.exists(p)]
+    if missing:
+        return _stop("입력 파일이 없다", missing=missing)
+    with open(layer, "rb") as f:
+        data = f.read()
+    with open(klb, "rb") as f:
+        klb_data = f.read()
+    digest = hashlib.sha256(data).hexdigest()
+    klb_digest = hashlib.sha256(klb_data).hexdigest()
+    bad = _frozen_mismatch(layer, frozen, digest)
+    if bad:
+        return _stop(f"{bad} — 얼린 층만 줄인다", sha256=digest)
+    klb_frozen = os.path.join(os.path.dirname(klb), f"FROZEN-{os.path.splitext(os.path.basename(klb))[0]}.sha256")
+    if os.path.exists(klb_frozen):
+        bad = _frozen_mismatch(klb, klb_frozen, klb_digest)
+        if bad:
+            return _stop(f"klb : {bad}", sha256=klb_digest)
+    else:
+        print(f"경고 : {os.path.basename(klb_frozen)} 이 없어 klb 층 sha 를 대조하지 않았다", file=sys.stderr)
+        klb_frozen = None
+    try:
+        lines = _line_rows(data, os.path.basename(layer))
+        klb_rows = [r for _, r in _line_rows(klb_data, os.path.basename(klb)) if r is not None]
+        kept, summary = thin_mrc_d(lines, klb_rows, a.keep, a.seed, merge_targets(TARGETS, _targets(a.targets))["edges"])
+    except Stop as e:
+        return _stop(str(e))
+    body = b"".join(kept)
+    summary.update(input=os.path.basename(layer), input_sha256=digest, frozen=os.path.basename(frozen),
+                   klb=os.path.basename(klb), klb_sha256=klb_digest,
+                   klb_frozen=klb_frozen and os.path.basename(klb_frozen), out_sha256=hashlib.sha256(body).hexdigest())
+    _refuse_or_move(outs, a.force)
+    os.makedirs(os.path.dirname(outs[0]), exist_ok=True)
+    with open(outs[0], "wb") as f:
+        f.write(body)
+    write_json(outs[1], summary)
+    print(json.dumps({k: v for k, v in summary.items() if k != "removed"}, ensure_ascii=False))
+    return 0
+
+
 def _split_pair(spec):
     """「decided.jsonl@pick.jsonl」 → (판정 폴더 또는 decided 파일, 후보 파일). @ 가 없으면 (None, 파일)."""
     if "@" in spec:
@@ -1256,7 +1424,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     for name, func in (("sample-v5", cmd_sample), ("v5-rate", cmd_rate), ("pick-new", cmd_pick), ("build", cmd_build),
-                       ("pick-klb", cmd_pick_klb), ("build-klb", cmd_build_klb)):
+                       ("pick-klb", cmd_pick_klb), ("build-klb", cmd_build_klb), ("thin-mrc-d", cmd_thin)):
         s = sub.add_parser(name)
         s.add_argument("--g4", default="~/.judgemodel/build/g4")
         s.add_argument("--old-root", default="~/.judgemodel")
@@ -1266,6 +1434,12 @@ def main(argv=None):
         s.set_defaults(func=func)
     for name in ("sample-v5", "build"):
         sub.choices[name].add_argument("--v5", nargs="*", help="v5 실물 줄 파일. 기본 <old-root>/sets/g1/train-g1-II.jsonl")
+    th = sub.choices["thin-mrc-d"]
+    th.set_defaults(seed=THIN_SEED)
+    th.add_argument("--layer", default="", help="얼린 train-g4-bal. 기본 <old-root>/sets/g4/train-g4-bal.jsonl")
+    th.add_argument("--frozen", default="", help="그 FROZEN. 기본 <old-root>/sets/g4/FROZEN-train-g4-bal.sha256")
+    th.add_argument("--klb", default="", help="klue-mrc b 묶음을 볼 층. 기본 <old-root>/sets/g4/train-g4-klb.jsonl")
+    th.add_argument("--keep", type=int, default=120, help="남길 klue-mrc d 줄 수 (K6 설계 3-1)")
     kb = sub.choices["build-klb"]
     kb.set_defaults(seed=KLB_SEED)
     kb.add_argument("--cands", nargs="*", default=None,

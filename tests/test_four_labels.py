@@ -527,6 +527,16 @@ class PreregFourTest(unittest.TestCase):
         self.assertEqual(got["next"]["fail"], "출시 관문 미달 — K5 는 내지 않고 8092 는 v1.1.0 유지 · blind-g4 는 쓴 셋")
         self.assertEqual(got["release_gate"], gate)
 
+    def test_g8_protocol_next_is_k6_round(self):
+        # K6 설계 6-1 : protocol-g8 박제는 K6 문구 — K5(g7) 문구를 박지 않는다
+        with open(PROTOCOL_G6.replace("protocol-g6.draft.json", "protocol-g8.draft.json"), encoding="utf-8") as f:
+            gate = json.load(f)["release_gate"]
+        got = prereg.build(self.four_spec(), {}, set(), set(), {"release_gate": gate}, "/x/protocol-g8.json", "e" * 64)
+        self.assertEqual(got["next"], prereg.NEXT_G8)
+        self.assertNotEqual(got["next"], prereg.NEXT_G7)
+        self.assertEqual(got["next"]["fail"], "출시 관문 미달 — K6 는 내지 않고 8092 는 v1.1.0 유지 · blind-g4 는 쓴 셋")
+        self.assertEqual(got["release_gate"], gate)
+
     def test_unknown_vs_ref_protocol_needs_next(self):
         gate = {"release_gate": protocol_gate_g2()}
         with self.assertRaises(SystemExit):

@@ -81,10 +81,15 @@ NEXT_G7 = {
     "p95_only": "int8 → 그래도 넘으면 K5 는 내지 않고 8092 는 v1.1.0 유지",
     "fail": "출시 관문 미달 — K5 는 내지 않고 8092 는 v1.1.0 유지 · blind-g4 는 쓴 셋",
 }
+NEXT_G8 = {
+    "pass": "gates.py release 통과 — 8092 교체는 사용자가 정한다",
+    "p95_only": "int8 → 그래도 넘으면 K6 는 내지 않고 8092 는 v1.1.0 유지",
+    "fail": "출시 관문 미달 — K6 는 내지 않고 8092 는 v1.1.0 유지 · blind-g4 는 쓴 셋",
+}
 # 기준 모델 대비 규약(vs_ref)의 다음 걸음 — 규약 파일 이름으로 고른다. 표에 없는 이름은 --next 로 준다.
 NEXT_BY_PROTOCOL = {"protocol-g2.json": NEXT_G2, "protocol-g3.json": NEXT_G3, "protocol-g4.json": NEXT_G4,
                     "protocol-g5.json": NEXT_G5, "protocol-g6.json": NEXT_G6,
-                    "protocol-g7.json": NEXT_G7}
+                    "protocol-g7.json": NEXT_G7, "protocol-g8.json": NEXT_G8}
 NEXT_V2 = {
     "pass": "nli-studio-v3 를 꽂는다 (응답 nli-v2) · 손님 판올림 · 진행상황 · mem history",
     "p95_only": "int8 → 그래도 넘으면 옛 서버(nli-studio-v2) 유지",

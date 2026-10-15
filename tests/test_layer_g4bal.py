@@ -1,7 +1,9 @@
 """layer_g4bal — K4 원천 균형 층 (원천 균형 판 설계 1-1 · 1-2 · 2절 · 3-1 · 5-5 ②). 글은 모두 지어낸 것이다."""
 import collections
+import hashlib
 import json
 import os
+import random
 import sys
 import tempfile
 import unittest
@@ -574,6 +576,179 @@ class KlbCliTest(unittest.TestCase):
         for name, cands in bad.items():
             self.assertEqual(self.run_klb(cands), 2, name)
             self.assertFalse(self.out_exists(), name)
+
+
+
+def mrc_d(rid, band, **extra):
+    """klue-mrc d 대상 줄 — band 0 · 1 · 2 가 겹침 구간이 되게 주장 낱말을 근거와 겹친다 (구간 가름 .1 · .2 · .35)."""
+    words = [f"w{rid}주장x{i}" for i in range(10)]                # 「주장」 을 낱말 안에 — 겹침 셈은 그대로, 화면 찍힘 검사가 대상 줄도 잡는다
+    shared = {0: 0, 1: 1, 2: 3}[band]
+    out = row(rid, "klue-mrc", "d", origin="g4-train", form="klue-removed", set=lb.LAYER,
+              evidence=" ".join(words[:shared]) + " 근거 끝", claim=" ".join(words))
+    out.update(extra)
+    out["groups"] = [out["group"]]
+    return out
+
+
+def jsonl_bytes(rows):
+    return b"".join(json.dumps(r, ensure_ascii=False).encode("utf-8") + b"\n" for r in rows)
+
+
+class ThinMrcDTest(unittest.TestCase):
+    """thin-mrc-d — K6 설계 3-1 · 3-3. 남김 차례 · 부분집합 · 재현 · exit 2."""
+
+    @staticmethod
+    def layer():
+        rows = [row("a0", "klue-mrc", "a", origin="g4-train"), row("b0", "klue-mrc", "b", group="klue:MATE"),
+                mrc_d("dm", 0, group="klue:MATE"), mrc_d("dp", 2, pair="c-x"),
+                row("c0", "kowiki", "d", origin="g4-train"), row("x0", "klue-mrc", "d", origin="g4-other")]
+        for band, n in ((0, 10), (1, 6), (2, 4)):
+            rows += [mrc_d(f"t{band}{i:02d}", band) for i in range(n)]
+        rows.append(row("c1", "klue-mrc", "c", origin="g4-train"))
+        return rows
+
+    @staticmethod
+    def lines(rows):
+        return lb._line_rows(jsonl_bytes(rows))
+
+    def thin(self, rows, keep=12, seed=None, klb=()):
+        return lb.thin_mrc_d(self.lines(rows), list(klb), keep, seed)
+
+    def test_keep_order_and_band_quota(self):
+        rows = self.layer()
+        kept, summary = self.thin(rows)
+        ids = [json.loads(raw)["id"] for raw in kept]
+        self.assertIn("dm", ids)                                       # ① 같은 묶음에 b
+        self.assertIn("dp", ids)                                       # ② pair
+        self.assertEqual((summary["target"], summary["kept"], summary["removed_n"]), (22, 12, 10))
+        self.assertEqual(summary["stages"], {"mate_b": 1, "pair": 1, "band": 10})
+        # 남은 몫 10 을 대상 전체 구간 수 11 : 6 : 5 로 큰 나머지 — 5.0 · 2.73 · 2.27 → 5 · 3 · 2
+        self.assertEqual(summary["bands_before"], {"0": 11, "1": 6, "2": 5, "3": 0})
+        self.assertEqual(summary["band_quota"], {"0": 5, "1": 3, "2": 2, "3": 0})
+        self.assertEqual(summary["bands_after"], {"0": 6, "1": 3, "2": 3, "3": 0})
+        self.assertEqual(sorted(summary["removed"]), sorted({r["id"] for r in rows} - set(ids)))
+
+    def test_klb_b_group_counts_as_mate(self):
+        rows = self.layer()
+        rows[1] = row("b0", "klue-mrc", "a", group="klue:MATE")                       # 층 안 b 를 없애면
+        _, summary = self.thin(rows)
+        self.assertEqual(summary["stages"]["mate_b"], 0)
+        _, summary = self.thin(rows, klb=[row("kb", "klue-mrc", "b", group="klue:MATE")])  # klb 의 b 묶음도 본다
+        self.assertEqual(summary["stages"]["mate_b"], 1)
+
+    def test_subset_bytes_and_reproducible(self):
+        rows = self.layer()
+        lines = self.lines(rows)
+        kept, _ = lb.thin_mrc_d(lines, [], 12)
+        again, _ = lb.thin_mrc_d(self.lines(rows), [], 12)
+        self.assertEqual(b"".join(kept), b"".join(again))                             # 같은 씨앗 = 같은 바이트
+        raws = [raw for raw, _ in lines]
+        self.assertEqual([r for r in raws if r in kept], kept)                       # 입력 줄 그대로 · 차례 그대로
+        others = [raw for raw, r in lines if not lb._thin_target(r)]
+        self.assertEqual([r for r in kept if r in others], others)                   # 대상 밖 줄은 하나도 안 빠짐
+        shuffled = list(rows)
+        random.Random(5).shuffle(shuffled)
+        got, _ = lb.thin_mrc_d(self.lines(shuffled), [], 12)
+        self.assertEqual(sorted(json.loads(r)["id"] for r in got), sorted(json.loads(r)["id"] for r in kept))
+        other, _ = lb.thin_mrc_d(lines, [], 12, seed=1)
+        self.assertNotEqual(b"".join(other), b"".join(kept))                          # 씨앗이 다르면 다르게 뽑는다
+
+    def test_mate_b_with_pair_counts_once(self):
+        rows = self.layer()
+        rows[2] = mrc_d("dm", 0, group="klue:MATE", pair="c-y")                        # mate_b 이면서 pair 도 가진 줄
+        _, summary = self.thin(rows)
+        self.assertEqual(summary["stages"], {"mate_b": 1, "pair": 1, "band": 10})     # mate_b 로 한 번만
+        self.assertEqual(sum(summary["stages"].values()), summary["kept"])
+
+    def test_bad_inputs_stop(self):
+        rows = self.layer()
+        for keep in (1, 22, 30):                                     # 짝 2 미만 · 대상 수 이상
+            with self.assertRaises(lb.Stop):
+                self.thin(rows, keep=keep)
+        with self.assertRaises(lb.Stop):
+            self.thin([r for r in rows if not lb._thin_target(r)])   # 대상 없음
+        with self.assertRaises(lb.Stop):
+            self.thin(rows + [dict(rows[0])])                       # id 겹침
+        with self.assertRaises(lb.Stop):
+            lb._line_rows(b'{"id": "a"}\nnot json\n')
+        with self.assertRaises(lb.Stop):
+            lb._line_rows(b'["not", "object"]\n')
+        with self.assertRaises(lb.Stop):                            # 구간 몫이 남은 줄보다 많다
+            self.thin([r for r in rows if not r["id"].startswith("t2")], keep=15)
+
+    def cli_root(self, tmp, rows, frozen_sha=None, frozen_name="train-g4-bal.jsonl"):
+        sets = os.path.join(tmp, "sets", "g4")
+        os.makedirs(sets)
+        body = jsonl_bytes(rows)
+        with open(os.path.join(sets, "train-g4-bal.jsonl"), "wb") as f:
+            f.write(body)
+        digest = frozen_sha or hashlib.sha256(body).hexdigest()
+        with open(os.path.join(sets, "FROZEN-train-g4-bal.sha256"), "w", encoding="utf-8") as f:
+            f.write(f"# want {{}}\n{digest}  {frozen_name}\n")
+        lb.write_jsonl(os.path.join(sets, "train-g4-klb.jsonl"), [])
+        return ["thin-mrc-d", "--g4", os.path.join(tmp, "g4"), "--old-root", tmp, "--keep", "12"]
+
+    @staticmethod
+    def run_cli(argv):
+        with mock.patch("sys.stdout") as out:
+            code = lb.main(argv)
+        return code, "".join(str(c.args[0]) for c in out.write.call_args_list if c.args)
+
+    def test_cli_writes_and_refuses(self):
+        rows = self.layer()
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = self.cli_root(tmp, rows)
+            code, printed = self.run_cli(argv)
+            self.assertEqual(code, 0)
+            self.assertNotIn("근거", printed)                              # 쌍 본문은 화면에 안 찍는다
+            self.assertNotIn("주장", printed)
+            out = os.path.join(tmp, "g4", lb.BAL2_LAYER)
+            with open(os.path.join(out, "cands.jsonl"), "rb") as f:
+                first = f.read()
+            with open(os.path.join(out, "summary.json"), encoding="utf-8") as f:
+                summary = json.load(f)
+            self.assertEqual(summary["out_sha256"], hashlib.sha256(first).hexdigest())
+            self.assertEqual(summary["klb_sha256"], hashlib.sha256(b"").hexdigest())     # klb sha 를 적는다
+            self.assertIsNone(summary["klb_frozen"])                                    # klb FROZEN 없음 = null
+            self.assertEqual((summary["rows_before"], summary["rows_after"]), (len(rows), len(rows) - 10))
+            self.assertEqual(self.run_cli(argv)[0], 2)                    # 덮어쓰기 거부
+            with open(os.path.join(out, "cands.jsonl"), "rb") as f:
+                self.assertEqual(f.read(), first)
+            self.assertEqual(self.run_cli(argv + ["--force"])[0], 0)      # --force 는 옛 출력을 날짜 꼬리로
+            self.assertEqual(len(os.listdir(out)), 4)
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = self.cli_root(tmp, rows, frozen_sha="0" * 64)
+            self.assertEqual(self.run_cli(argv)[0], 2)                    # FROZEN sha 다름
+            self.assertFalse(os.path.exists(os.path.join(tmp, "g4", lb.BAL2_LAYER)))
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = self.cli_root(tmp, [r for r in rows if not lb._thin_target(r)])
+            self.assertEqual(self.run_cli(argv)[0], 2)                    # 대상 없음
+            self.assertFalse(os.path.exists(os.path.join(tmp, "g4", lb.BAL2_LAYER)))
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = self.cli_root(tmp, rows, frozen_name="other.jsonl")
+            self.assertEqual(self.run_cli(argv)[0], 2)                    # FROZEN 파일 이름 다름
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = self.cli_root(tmp, rows)
+            with open(os.path.join(tmp, "sets", "g4", "FROZEN-train-g4-klb.sha256"), "w", encoding="utf-8") as f:
+                f.write(f"{'0' * 64}  train-g4-klb.jsonl\n")
+            self.assertEqual(self.run_cli(argv)[0], 2)                    # klb sha 가 FROZEN 과 다름
+            with open(os.path.join(tmp, "sets", "g4", "FROZEN-train-g4-klb.sha256"), "w", encoding="utf-8") as f:
+                f.write(f"{hashlib.sha256(b'').hexdigest()}  train-g4-klb.jsonl\n")
+            self.assertEqual(self.run_cli(argv)[0], 0)                    # 맞으면 지나간다
+            with open(os.path.join(tmp, "g4", lb.BAL2_LAYER, "summary.json"), encoding="utf-8") as f:
+                self.assertEqual(json.load(f)["klb_frozen"], "FROZEN-train-g4-klb.sha256")
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = self.cli_root(tmp, rows)
+            os.remove(os.path.join(tmp, "sets", "g4", "train-g4-klb.jsonl"))
+            self.assertEqual(self.run_cli(argv)[0], 2)                    # --klb 파일 없음
+            self.assertFalse(os.path.exists(os.path.join(tmp, "g4", lb.BAL2_LAYER)))
+        with tempfile.TemporaryDirectory() as tmp:                        # 입력 파일 없음
+            self.assertEqual(self.run_cli(["thin-mrc-d", "--g4", os.path.join(tmp, "g4"), "--old-root", tmp])[0], 2)
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = self.cli_root(tmp, rows)
+            with mock.patch.object(lb, "inside_git", lambda path: True):
+                self.assertEqual(self.run_cli(argv)[0], 2)                # git 안 거부
+            self.assertFalse(os.path.exists(os.path.join(tmp, "g4", lb.BAL2_LAYER)))
 
 
 class CliTest(unittest.TestCase):

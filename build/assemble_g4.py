@@ -12,6 +12,7 @@
     python -I assemble_g4.py protocol --draft ../measure/protocol-g4.draft.json --dest … --out ../measure/protocol-g4.json
     python -I assemble_g4.py protocol --draft ../measure/protocol-g5.draft.json --dest … --out ../measure/protocol-g5.json   (K3)
     python -I assemble_g4.py protocol --draft ../measure/protocol-g7.draft.json --out ../measure/protocol-g7.json   (K5)
+    python -I assemble_g4.py protocol --draft ../measure/protocol-g8.draft.json --out ../measure/protocol-g8.json   (K6)
 
 셋 = 이을 g3 셋(dev-cmp-g4 ← dev-cmp-g3 · blind-g4 는 안 잇는다) + 예약 후보 `<build>/reserve/<셋>-cands.jsonl` 중 확정 칸이 있는 줄.
 확정 칸 · 새 줄 꼴 · 중복 규칙은 assemble_g3 와 같다. 꼬리표만 g4 다 — 새 줄 `g4_label: v6-new`,
@@ -45,7 +46,7 @@ HOME = os.path.join(os.path.expanduser("~"), ".judgemodel")
 G4_SETS = ("dev-cmp-g4", "blind-g4")
 G4 = Gen("g4_label", "g3_set", "g3-carry", {"dev-cmp-g4": "dev-cmp-g3", "blind-g4": None}, "g3")
 G3_SIDE_SETS = ("dev-cal-g3", "blind-g3")         # 겹침만 같이 본다 (dev-cal-g3 는 g4 규약에서도 쓴다)
-TRAIN_SETS = ("train-g4-c", "train-g4-c-h", "train-g4-d", "train-g4-bal", "train-g4-klb")   # train/freeze.py 로 얼린 학습 층 — 규약 train_sets 자리
+TRAIN_SETS = ("train-g4-c", "train-g4-c-h", "train-g4-d", "train-g4-bal", "train-g4-klb", "train-g4-bal2")   # train/freeze.py 로 얼린 학습 층 — 규약 train_sets 자리
 DRAFT = os.path.join(HERE, "..", "measure", "protocol-g4.draft.json")
 CELL_OF = {"support": "a", "contradict": "b", "unrelated": "c", "related": "d", "a": "a", "b": "b", "c": "c", "d": "d"}
 THIN = 10
