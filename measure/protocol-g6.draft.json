@@ -1,0 +1,93 @@
+{
+ "name": "protocol-g6",
+ "draft_note": "초안 — 빈 \"\" 해시 자리(train_sets.train-g4-bal 하나)는 assemble_g4.py protocol 이 얼린 sha256 으로 채워 protocol-g6.json 을 쓴다. 적힌 해시는 얼린 파일과 대조만 한다. 이 초안은 그대로 둔다",
+ "design": "Docs/Design/2026-10-14-v1.2-원천균형판설계.md 5-4 · 5-6",
+ "hash_rule": "이 파일 바이트의 sha256 을 모든 결과(eval summary.json · compare · gates · prereg)에 protocol_sha256 으로 적는다. 첫 비교 전에 커밋하고, 고치려면 protocol-g7.json 새 판을 만든다 (이 파일은 첫 비교 뒤 안 고친다). protocol-g1 ~ g5 는 그대로 둔다.",
+ "label_guide": "support-v6",
+ "label_guide_note": "g6 = 셋은 g4 그대로 · 새 학습 층 train-g4-bal 은 원천마다 a · b · c · d 가 든 층(v6 줄 · 표본 재판정을 거친 v5 실물 줄 · 새 v6 판정 줄 · archive 씨앗 줄, layer_g4bal.py)",
+ "seeds": [1, 2, 3, 4, 5],
+ "seeds_note": "protocol-g3 와 같다 — 씨앗 5 · 결정 모드(train_nli --deterministic) · 시작점 runs/base-2/ckpt-best",
+ "seed_rerun": 1,
+ "ckpt": "last",
+ "release_pick": {"rule": "closest_to_mean", "metric": "c_recall", "lang": "ko", "set": "dev-cmp-g4", "tie": "acc3(쌍 전체) 높은 판 · 그다음 씨앗 작은 판"},
+ "bootstrap": {"n": 10000, "ci": 0.95, "rng_seed": 20261011, "resample": "group", "seeds": "고정 — 씨앗은 다시 뽑지 않는다"},
+ "group_key": "group",
+ "majority": "씨앗 중 과반이 맞혀야 맞힘 (맞힌 수 × 2 > 씨앗 수) — McNemar 입력",
+ "calibrate_on": "dev-cal-g3",
+ "compare_on": "dev-cmp-g4",
+ "sets": {
+  "dev-cal-g3": "7f9a2f1d89bbf9f1d38f5d59e252d2388a26d9da54f8b0a49f27dd0490ec2c6c",
+  "dev-cmp-g4": "fa2f81cb4226475aebb825d61af8f36efc0be695ef9d32e78427d4ea0b1ae59b",
+  "blind-g4": "c6d796d16a7b240146497871684fad385fec5f120f84bc980aadf335b04fc8dc"
+ },
+ "sets_note": "셋은 g4 그대로 — g6 은 규약 판 번호다(해시 셋 다 protocol-g4 · g5 와 같음). dev-cal-g3 는 protocol-g3 와 같은 해시 · dev-cmp-g4 = dev-cmp-g3 + 새 ko c (BoolQ · 위키 · KLUE near-x) · blind-g4 새로 (en b · a · c · ko b · a · c, release_gate.min_groups 이상). 빈 해시가 남아 있으면 compare · gates 는 해시가 다르다며 거부한다. ood-g1 은 보고만 하는 셋이라 protocol-g1 해시 그대로",
+ "report_only_sets": {"ood-g1": "6584a3176e672d1543246b39ca3eef4a411f034298cbfeef905089562880372c"},
+ "train_sets": {
+  "train-g3-ko": "4a1025aa859f4975b01cbce8abd9a4dc747a6c6d55c4a0e015a3b4fc9e92018a",
+  "train-g4-c": "271546a1526422f856fbcf18f9cef208b3ed8be2dce32bdfb8db8cbc8bf3b057",
+  "train-g4-c-h": "191bfb2df63b734fc869f194d7287884d85ea6ff19bda70b83ac1af38005650f",
+  "train-g4-d": "739072b92c9824ffab193c73528bcabcd8efd4fb89ec261bf4ae2dbd647ebfb9",
+  "train-g4-bal": ""
+ },
+ "train_sets_note": "K4 = K 처방 + train-g4-bal (train-g4-c · -c-h · -d 는 층 재료로만 썼고 학습에 따로 안 넣는다. ~/.judgemodel/sets/g4/train-g4-*.jsonl, FROZEN-*.sha256). 재는 셋이 아니라 compare · gates 는 안 읽는다 — 학습 입력이 바뀌지 않았는지 맞춰 보는 자리. 학습 · 합성 · 덧학습 금지 목록 : sets/g3/blind-g3.forbid.json · sets/g4/blind-g4.forbid.json",
+ "side": {"mnli": "mnli-devm2000", "klue": "klue-dev", "k48": "k48"},
+ "pair_gate": {
+  "base": "K",
+  "base_note": "K 판(2026-10-14) — 기준 판은 K 씨앗 다섯, K4 = K 처방 + train-g4-bal. K3 → K4 차는 보고만 (compare --base K3=…). 기준선 summary 는 measure/restamp.py 로 g6 해시를 다시 찍어 쓴다",
+  "new": "K4",
+  "slice_note": "lang · domain 칸이 달린 자는 셋 줄의 그 칸이 같은 쌍만으로 센다 (compare.py ruler_name — 이름 c_recall@ko · b_recall@mem·ko)",
+  "target": {"metric": "c_recall", "lang": "ko", "min_mean_diff": 0.03, "ci_low_gt": 0.0},
+  "guards": [
+   {"metric": "b_recall", "lang": "en", "ci_low_ge": -0.03},
+   {"metric": "b_recall", "ci_low_ge": -0.02},
+   {"metric": "acc3", "ci_low_ge": -0.02},
+   {"metric": "a_recall", "ci_low_ge": -0.03},
+   {"metric": "c_recall", "ci_low_ge": -0.03},
+   {"metric": "d_recall", "ci_low_ge": -0.03},
+   {"metric": "false_support", "max_ratio": 1.2},
+   {"metric": "side_acc3", "sides": ["mnli", "klue"], "min_mean_diff": -0.010},
+   {"metric": "b_recall", "lang": "ko", "ci_low_ge": -0.03}
+  ],
+  "alarms": [
+   {"metric": "k48_hits", "min": 40},
+   {"metric": "b_recall", "domain": "mem", "lang": "ko", "min_mean_diff": -0.03},
+   {"metric": "a_recall", "lang": "ko", "min_mean_diff": -0.03},
+   {"metric": "d_recall", "lang": "ko", "min_mean_diff": -0.05},
+   {"metric": "c_recall", "lang": "ko", "min_mean_diff": 0.06},
+   {"metric": "d_recall", "lang": "en", "min_mean_diff": -0.05},
+   {"metric": "recalls", "langs": ["", "ko", "en"], "max_mean_diff": 0.20},
+   {"metric": "pred_shift", "by": "domain", "max_shift": 0.30, "min_n": 20}
+  ],
+  "alarms_note": "g6 새 경보 둘(진단용 · 판정은 안 바꾼다) — recalls : a · b · c · d 재현 × (쌍 전체 · @ko · @en) 중 평균 차 > +.20 (너무 오름, K3 의 d@en +.315). pred_shift : 원천(domain)마다 정답 x 중 y 로 본 몫(x≠y)이 K 대비 +.30 넘게 오름 · 정답 x 가 min_n 쌍 이상인 칸만 (K3 의 VitaminC c→d .95)",
+  "report_only": ["by domain · lang b_recall (원천별 ko b)", "ko d_recall", "a_to_b · d_to_b", "잣대 3쌍 b 확률", "use1 ② 놓친 b 7쌍", "unsure (dev-cal-g3 문턱)", "d sure precision (dev-cal-g3 문턱)", "원천별 a · b · c · d 재현 (--by domain,lang)", "c_to_d · c_to_b · b_to_c", "K2 → K3 차 (같은 명령 --base K2=…)", "d 정답의 c 몫", "원천 × 꼴별 d 재현", "겹침 구간별 d→c (layer_g4d.overlap)", "원천 × 칸 재현 표 (--by domain)", "K3 → K4 차 (같은 명령 --base K3=…)", "빈칸 검사 table (assemble_g4.py cells)"],
+  "verdicts": {"먹힘": "목표 충족 · 지킴 다 통과", "같다": "목표 못 미침 (접는다 — K4 처방은 안 쓰고 결과만 적는다)", "지킴 깨짐": "지킴 하나라도 미달 → 접는다 (대체 판 없음, 원천 균형 판 설계 5-4)", "보류": "목표 충족인데 지킴 중 잴 수 없는 것이 있음 (곁 자 없음 등)", "판별 불가": "기준선 ko c 씨앗 평균 짝 반폭 > .04 — compare 가 내지 않는다, 메인 판단"}
+ },
+ "cell_check": {"dev": "dev-cmp-g4", "thin": 10, "recipe": ["train-r2", "train-g1-arch", "train-g3-ko", "train-g4-bal"],
+  "note": "기록용 — 조립 검사(assemble_g4.py check --recipe · cells)가 쓴 값. 학습 0 · dev ≥ 1 칸이 있으면 얼리지 않는다 · 10줄 미만은 경고"},
+ "release_gate": {
+  "set": "blind-g4",
+  "ref_model": "v1.1.0",
+  "ref_model_note": "v1.1.0 = runs/g1-B2-s3/ckpt-best (가중치 sha256 14d0d520…)",
+  "b_recall_min": [
+   {"metric": "b_recall", "min": 0.80},
+   {"metric": "b_recall", "lang": "ko", "min": 0.70}
+  ],
+  "vs_ref": [
+   {"metric": "b_recall", "lang": "ko", "ci_low_gt": 0.0},
+   {"metric": "b_recall", "ci_low_ge": -0.02},
+   {"metric": "b_recall", "lang": "en", "ci_low_ge": -0.03},
+   {"metric": "acc3", "ci_low_ge": -0.02},
+   {"metric": "a_recall", "ci_low_ge": -0.03},
+   {"metric": "c_recall", "ci_low_ge": -0.03},
+   {"metric": "d_recall", "ci_low_ge": -0.03}
+  ],
+  "sure_false_support_share_max": 0.015,
+  "unsure_vs_ref_max_diff": 0.03,
+  "p95_ms_max": 1000.0,
+  "min_groups": {"b@en": 200, "a": 380, "c": 260, "b@ko": 220},
+  "min_groups_note": "잴 셋에서 gold 칸(글자) · 언어(@lang)별 묶음(group_key) 수의 아래 — 모자라면 assemble_g4 check 가 얼리기를 막고 gates.py release 가 거부한다",
+  "group_cap": {"vitaminc": 2},
+  "group_cap_note": "기록용 — VitaminC 쪽당 b 2 · a 2 (make_sets.G4_GROUP_CAP)",
+  "note": "b_recall_min 은 절대 자 목록 (쌍 전체 b ≥ .80 · ko b ≥ .70). vs_ref 는 같은 쌍 차의 묶음 붓스트랩 95% 아래끝 — protocol-g3 와 같은 자"
+ }
+}

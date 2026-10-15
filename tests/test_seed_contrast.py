@@ -1,4 +1,5 @@
 """seed_contrast — 씨앗 값 자리 · 새 값 · a 꼴 · 금지 목록 · 기계 검사 · count→make 흐름. 입력은 모두 지어낸 짧은 글이다."""
+import collections
 import contextlib
 import io
 import json
@@ -7,6 +8,7 @@ import random
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 import helpers  # noqa: F401
 
@@ -209,6 +211,144 @@ class FlowTest(unittest.TestCase):
             self.assertLessEqual(max(sum(1 for r in rows if r["group"] == g) for g in {r["group"] for r in rows}), sc.GROUP_CAP)
             count = json.loads(buf.getvalue())
             self.assertEqual(count["b_pass"], count["b_total"])
+
+
+
+def write_docs(studio):
+    """FlowTest 와 같은 가짜 문서 여덟 — 절 하나에 문장 여섯."""
+    docs = os.path.join(studio, "ToolA", "Docs", "Research")
+    os.makedirs(docs)
+    for d in range(8):
+        lines = ["# 조사", "", "## 1. 결과", ""]
+        for i in range(6):
+            k = d * 6 + i
+            lines.append(f"- 10-{10 + k % 9:02d} 에 시험 {k % 7 + 2}개를 돌려 {k + 20}초 걸렸고 사용자가 판 {k}을 정했다.")
+        with open(os.path.join(docs, f"2026-10-13-가짜{d}.md"), "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+
+
+def sha_of(path):
+    import hashlib
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+class ParagraphTest(unittest.TestCase):
+    """K4 archive 씨앗 (원천 균형 판 설계 3-2 · 5-5 ③) — --evidence paragraph · K 씨앗 빼기 · 옛 기본값 바이트 그대로."""
+
+    # 고치기 전 seed_contrast 로 write_docs 를 count · make(--n 12) 한 출력의 sha256 (2026-10-14 손질 전에 잼)
+    OLD_SHA = {"seeds-all.jsonl": "fa6f5b14bddd75b14f1bd93d8ec63a99c90be2bd677ff6dda715b4c3d26c79cf",
+               "input.jsonl": "df312da36c80a17d7a697c750fb2ba822faa760d373b4ad382df40bbb1878d5a",
+               "sample50.jsonl": "df312da36c80a17d7a697c750fb2ba822faa760d373b4ad382df40bbb1878d5a",
+               "seed-groups.txt": "8ecd4d723d95f80efe8720e7d662970155db995bf381d00b7abb12158894f3f1",
+               "make.json": "8a70d917244c106256be011bac581df475bdb2405a906d0add6accf4ca02c59f"}
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp = self._tmp.name
+        self.studio, self.judge, self.out = (os.path.join(tmp, n) for n in ("studio", "judge", "out"))
+        write_docs(self.studio)
+        os.makedirs(self.judge)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def run_sc(self, *argv):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            sc.main(list(argv))
+        return buf.getvalue()
+
+    def count(self, *extra):
+        return self.run_sc("count", "--out", self.out, "--studio", self.studio, "--judge-root", self.judge,
+                           "--allow-missing", "--allow-git", "--names", "--game-names", *extra)
+
+    def make(self, *extra):
+        return self.run_sc("make", "--out", self.out, "--judge-root", self.judge, "--n", "12", "--allow-git",
+                           "--names", "--game-names", *extra)
+
+    def test_default_output_bytes_same_as_before(self):
+        self.count()
+        self.make()
+        for name, sha in self.OLD_SHA.items():
+            self.assertEqual(sha_of(os.path.join(self.out, name)), sha, name)
+
+    def test_paragraph_rows(self):
+        self.count("--evidence", "paragraph")
+        self.make("--evidence", "paragraph", "--domain", "archive")
+        rows = [json.loads(line) for line in read(os.path.join(self.out, "input.jsonl")).splitlines()]
+        self.assertEqual(len(rows), 12)
+        for r in rows:
+            self.assertTrue(r["seed_id"].startswith(sc.PARA_ID))
+            self.assertEqual((r["domain"], r["evidence_mode"], r["source"]), ("archive", "paragraph", "doc"))
+            self.assertIn(r["seed"], r["evidence"])                       # 근거 문단에 씨앗 문장이 든다
+            self.assertGreater(len(r["evidence"]), len(r["seed"]))        # 문장 하나보다 길다 (앞뒤 문장)
+            self.assertLessEqual(r["evidence"].count("정했다."), 1 + 2 * sc.PARA_SPAN)
+        make = json.loads(read(os.path.join(self.out, "make.json")))
+        self.assertEqual((make["evidence"], make["domain"]), ("paragraph", "archive"))
+
+    def test_k_seed_sentences_excluded(self):
+        self.count("--evidence", "paragraph")
+        seeds = [json.loads(line) for line in read(os.path.join(self.out, "seeds-all.jsonl")).splitlines()]
+        k_input = os.path.join(self.judge, "k-input.jsonl")
+        with open(k_input, "w", encoding="utf-8") as f:
+            for r in seeds[:5]:
+                f.write(json.dumps({"seed_id": "k0001", "seed": r["text"]}, ensure_ascii=False) + "\n")
+        out = self.count("--evidence", "paragraph", "--exclude-seeds", k_input)
+        again = [json.loads(line)["text"] for line in read(os.path.join(self.out, "seeds-all.jsonl")).splitlines()]
+        self.assertEqual(len(again), len(seeds) - 5)
+        self.assertFalse({r["text"] for r in seeds[:5]} & set(again))
+        report = json.loads(out)
+        self.assertEqual((report["count"]["k_seed"], report["exclude_seeds"]), (5, 5))
+
+    def test_paragraph_default_k_seed_file_needed(self):
+        # --allow-missing 없이 paragraph 꼴은 K 씨앗 기본 파일(<judge-root>/build/g3/seed/input.jsonl)이 있어야 한다
+        with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            sc.main(["count", "--out", self.out, "--studio", self.studio, "--judge-root", self.judge, "--allow-git",
+                     "--names", "--game-names", "--evidence", "paragraph"])
+
+    def test_make_paragraph_needs_paragraph_seeds(self):
+        self.count()
+        with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
+            sc.main(["make", "--out", self.out, "--judge-root", self.judge, "--allow-git", "--names", "--game-names",
+                     "--evidence", "paragraph"])
+
+    def test_paragraph_group_cap_two(self):
+        self.count("--evidence", "paragraph")
+        self.make("--evidence", "paragraph")
+        rows = [json.loads(line) for line in read(os.path.join(self.out, "input.jsonl")).splitlines()]
+        per = collections.Counter(r["group"] for r in rows)
+        self.assertLessEqual(max(per.values()), sc.PARA_GROUP_CAP)
+        self.assertEqual(sc.PARA_GROUP_CAP, 2)
+
+    def test_paragraph_forbid_adds_g3_g4_eval(self):
+        def put(rel, rows):
+            path = os.path.join(self.judge, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
+        put("sets/g4/dev-cmp-g4.jsonl", [{"evidence": "g4 평가 문장.", "claim": "c", "group": "doc:studio:Docs/g4.md"}])
+        put("sets/g3/blind-g3.jsonl", [{"evidence": "g3 평가 문장.", "claim": "c", "group": "doc:studio:Docs/g3.md"}])
+        with open(os.path.join(self.judge, "sets", "g4", "blind-g4.forbid.json"), "w", encoding="utf-8") as f:
+            json.dump({"groups": ["doc:ArtTool:Docs/f4.md"]}, f)
+        old = sc.SeedForbid(self.judge)
+        new = sc.SeedForbid(self.judge, evidence="paragraph")
+        want = {"Docs/g4.md", "Docs/g3.md", "ArtTool/Docs/f4.md"}
+        self.assertFalse(want & old.docs)                                   # seed 꼴은 옛 금지 그대로
+        self.assertEqual(want & new.docs, want)
+        self.assertIn(sc.norm("g4 평가 문장."), new.texts)
+        self.assertNotIn("blind-g4.forbid.json", new.missing)
+        self.assertIn("blind-g3.forbid.json", new.missing)
+        self.assertNotIn("blind-g3.forbid.json", old.missing)
+
+    def test_paragraph_window(self):
+        doc = {"intro_ok": ["머리 하나다."], "sections": [("가", ["첫 문장 이다.", "둘째 문장 이다.", "셋째 문장 이다."])]}
+        with unittest.mock.patch.object(sc.ma, "arch_text_ok", lambda t: True):
+            got = sc._paragraphs(doc)
+        self.assertEqual(got["첫 문장 이다."], "첫 문장 이다. 둘째 문장 이다.")
+        self.assertEqual(got["둘째 문장 이다."], "첫 문장 이다. 둘째 문장 이다. 셋째 문장 이다.")
+        self.assertEqual(got["머리 하나다."], "머리 하나다.")
 
 
 if __name__ == "__main__":

@@ -748,3 +748,80 @@ python3 -I src/measure/compare.py --protocol src/measure/protocol-g5.json --set 
   --by domain,lang --out runs/g4-K3-eval/compare.json --md runs/g4-K3-eval/compare.md
 # 보고만 --base K2=$R/g1-K2-s* → compare-K2 · 맞춤 확인 --base K=$R --new K2=$R → sanity-K-K2
 ```
+
+## 23. K4 원천 균형 층 train-g4-bal 조립 · 검사 · 얼림 · protocol-g6 (원천 균형 판 설계 1절 · 4절 · 5-1 6단계 · 5-6, 2026-10-14)
+
+**결론 :** train-g4-bal **2,914쌍**(a 384 · b 409 · c 1,332 · d 789 · ko 1,608 · en 1,304 · mix 2)을 조립했다. 목표 3,222 의 90%다. 빈칸 검사 K 처방 + 새 층 `zero` **0** · `thin` 1(mit-cs b 3) · 겹침 8칸 0 · recheck 0 · scrub 0 · exit 0. `~/.judgemodel/sets/g4/` 에 얼렸고 앞선 다섯은 바이트 그대로다. `protocol-g6.json` 의 빈 자리(train-g4-bal 해시 하나)를 채웠다.
+
+### 23-1. 원천 × 칸 채움
+
+| 원천 | 칸 | 목표 | 채움 | 모자람 | 어디서 |
+| --- | --- | --- | --- | --- | --- |
+| vitaminc | a · b · c · d | 200 · 320 · 100 · 180 | 200 · 320 · 100 · 180 | 0 | v6 (c 는 v6 43 · v5 57) |
+| klue-mrc | a · b · c · d | 90 · 37 · 132 · 243 | 90 · **32** · 132 · 243 | b 5 | a v6 7 · v5 83 / b v6 10 · v5 22 / c v6 10 · v5 122 / d v6 |
+| proposals | a · b · c · d | 50 · 13 · 310 · 130 | 50 · **10** · 310 · 130 | b 3 | v5 (다시 판정한 줄만) |
+| kobest-boolq | c · d | 300 · 67 | 300 · **59** | d 8 | c v6 / d v6 1 · 새 판정 58 |
+| kowiki | c · d | 200 · 100 | 200 · 100 | 0 | v6 |
+| klue-answered | c · d | 250 · 60 | 250 · 60 | 0 | c v6 / d v6 29 · 새 판정 31 |
+| mit-cs | b · c · d | 60 · 40 · 40 | **3** · 40 · **17** | b 57 · d 23 | 새 판정 (d 는 v6 3 더함) |
+| archive | a · b · d | 100 · 100 · 100 | **44** · **44** · **0** | 56 · 56 · 100 | 씨앗 짝(b · a) 44 |
+
+- 새 판정에서 다른 칸으로 정해진 줄이 많다 : mit-rev(b 후보) 87 중 b 3 · a 84, mit-other(d) 75 중 c 59 · d 14, boolq-removed(d) 130 중 d 58 · a 31 · b 36. 칸 옮김(moved) 271줄.
+- archive 씨앗 : 판정 216줄 중 짝 규칙(짝의 모든 줄 판정 = hint)으로 남은 줄 208. 그중 b 짝 a 가 있는 씨앗 44 만 짝째 들고, a 줄이 없는 b 씨앗 120 은 「한 줄 묶음」이라 빠진다. 씨앗 d 는 메인 결정으로 안 넣었다.
+- 짝 묶음 234 통째 · 짝 일부 171줄 · 한 줄 2,275. 근거 묶음 × 칸 최대 2. 빠진 까닭 : K 처방과 같은 쌍 139 · 평가 글 32 · 평가 문단 12 · 쌍 열쇠 겹침 9 · 그 밖 금지 7.
+
+### 23-2. 검사
+
+| 검사 | 결과 |
+| --- | --- |
+| `cells` (train-r2 · train-g1-arch · train-g3-ko + train-g4-bal, dev-cmp-g4) | `zero` 0 · `thin_cells` mit-cs b (3 / dev 31) · `dev_missing` mit-cs c · d · seed a · b · d |
+| `check --recipe` (같은 넷) | 학습 8,708줄(기본 `--train` 5,794 + train-g4-bal) · 겹침 8칸 0 · `min_groups` 모자람 없음 · exit 0 · `overlap_skipped_base` train-r2 · train-g1-arch |
+| scrub (`scrub.py check`, 2,914줄) | 0 |
+| 학습 입력 꼴 | `data_prep.read_pairs` 로 2,914줄 다 라벨 읽힘(evidence · claim · want 만 씀, `v5_want` · `relabel` · `keep` 같은 칸은 안 읽음) |
+
+- 얼린 뒤 `sets/g4/` 사본으로 `cells` · `check` 를 한 번 더 돌려 같은 값(exit 0)을 봤다.
+
+### 23-3. 얼림 · protocol-g6
+
+| 파일 | 쌍 | sha256 |
+| --- | --- | --- |
+| `sets/g4/train-g4-bal.jsonl` (`build/g4/train-g4-bal/cands.jsonl` 그대로 복사) | 2,914 | `27729dad0fbeba1edc96d023226171b0fabe4f62e384f21a15967848b42794ca` |
+| `measure/protocol-g6.json` | — | `6d5d1ccc0d3688140649ba5f07935e307cc141a3614ea53034b4964b17b68a7b` |
+
+- `freeze.py check` 여섯(dev-cmp-g4 · blind-g4 · train-g4-c · -c-h · -d · -bal) ok.
+- protocol-g6 : 초안과 다른 곳은 `train_sets.train-g4-bal` 한 줄뿐(diff 확인, 초안 `0120f7ca…` 그대로). `compare.read_protocol` 로 읽힘 · TODO 0. protocol-g5 와 견주면 sets · compare_on · calibrate_on · release_pick · bootstrap · seeds · majority · release_gate · pair_gate.target · guards(9줄) 같음, base K → new K4 · alarms 8줄 · `cell_check` 새 칸 — 설계 5-6 표와 맞다.
+
+### 23-4. 학습 층 비율 (한 바퀴 · replay 뺌, 실물)
+
+| | K | **K4** |
+| --- | --- | --- |
+| 쌍 | 7,045 | **9,959** |
+| a · b · c · d · cd | 2,207 · 2,124 · 1,437 · 948 · 329 | **2,591 · 2,533 · 2,769 · 1,737 · 329** |
+| replay 몫 (2,965 / 바퀴) | 29.6% | **22.9%** |
+
+### 23-5. 명령
+
+```
+# 씨앗 판정 → keep 칸 (git 밖 손 스크립트 — seed_to_pairs.judge_rows 의 짝 규칙을 newjudge/decided.jsonl 로)
+#   seed-pairs.jsonl + newjudge/decided.jsonl → <g4>/train-g4-bal/seed-judged.jsonl
+B=~/.judgemodel/build; S=~/.judgemodel/sets; G=$B/g4
+python -I layer_g4bal.py build --g4 $G \
+  --v6 $S/g2/train-g2-b.jsonl $S/g4/train-g4-c.jsonl $S/g4/train-g4-d.jsonl \
+       $G/train-g4-d-re@$G/train-g4-d-re/cands-re.jsonl $G/train-g4-d@$G/train-g4-d/pick.jsonl \
+       $B/g2/train-g2-b@$B/g2/train-g2-b/cands.jsonl $G/judge/train-g4-c@$G/train-g4-c/pick.jsonl \
+       $B/g3/boolq/boolq-labeled-train.jsonl $B/g3/kowiki/wiki-labeled-train.jsonl $B/g3/klue/klue-labeled-train.jsonl \
+       $B/g3/mit/judged.jsonl $B/g3/seed/judged.jsonl \
+  --v5-dirs $G/train-g4-bal/v5sample $G/train-g4-bal/v5re --dirs $G/train-g4-bal/newjudge \
+  --seed-pairs $G/train-g4-bal/seed-judged.jsonl
+R="$S/2026-10-10/build/train-r2.jsonl $S/g1/train-g1-arch.jsonl $S/g3/train-g3-ko.jsonl $S/g4/train-g4-bal.jsonl"
+python -I assemble_g4.py cells --recipe $R --dev $S/g4/dev-cmp-g4.jsonl
+python -I assemble_g4.py check --recipe $R
+cp $G/train-g4-bal/cands.jsonl $S/g4/train-g4-bal.jsonl
+python -I ../train/freeze.py write --pairs $S/g4/train-g4-bal.jsonl --out $S/g4/FROZEN-train-g4-bal.sha256
+python -I assemble_g4.py protocol --draft ../measure/protocol-g6.draft.json --out ../measure/protocol-g6.json
+```
+
+- 경로는 Git Bash 에서 `C:/…` 꼴로 준다 — `~/…@~/…` 꼴은 `@` 뒤가 안 풀려 「없는 파일」로 멈춘다.
+- 나3 은 `train-g4-d-re` 를 `train-g4-d` 보다 앞에 둔다 — 같은 id 는 앞 것이 남아(`same_id_earlier`) VitaminC 다시 판정 줄이 쓰인다.
+
+- **K4 결과(10-15)** : 짝 비교 K → K4 지킴 깨짐(b_recall@ko −.019 [−.0394, 0]) → 접음 · 8092 v1.1.0 유지. `../Docs/Research/2026-10-15-v1.2-K4판짝비교.md`.

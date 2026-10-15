@@ -581,6 +581,86 @@ class G5AlarmTest(unittest.TestCase):
         self.assertIn("d_recall@en 평균 차 -1.0000 < -0.05", alarms)
 
 
+PROTOCOL_G5_FROZEN = os.path.join(helpers.ROOT, "measure", "protocol-g5.json")
+PROTOCOL_G6 = os.path.join(helpers.ROOT, "measure", "protocol-g6.draft.json")
+
+
+class G6AlarmTest(unittest.TestCase):
+    """protocol-g6 초안 — 새 경보 둘 「너무 오름」(recalls · max_mean_diff) · 「원천별 쏠림」(pred_shift) (원천 균형 판 설계 5-4 · 5-6)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.fx = Fixture(self._tmp.name, PROTOCOL_G6)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_draft_same_as_g5_but_k4_rows(self):
+        g6, _ = cmp.read_protocol(PROTOCOL_G6)
+        g5, _ = cmp.read_protocol(PROTOCOL_G5_FROZEN)
+        for key in ("sets", "compare_on", "calibrate_on", "release_pick", "bootstrap", "seeds", "majority", "release_gate",
+                    "side", "group_key", "label_guide"):
+            self.assertEqual(g6[key], g5[key], key)
+        for key in ("target", "guards", "slice_note"):
+            self.assertEqual(g6["pair_gate"][key], g5["pair_gate"][key], key)
+        self.assertEqual((g6["name"], g6["pair_gate"]["base"], g6["pair_gate"]["new"]), ("protocol-g6", "K", "K4"))
+        self.assertEqual(g6["pair_gate"]["alarms"][:6], g5["pair_gate"]["alarms"])
+        self.assertEqual(len(g6["pair_gate"]["alarms"]), 8)
+        self.assertEqual(g6["train_sets"], dict(g5["train_sets"], **{"train-g4-bal": ""}))
+        self.assertEqual(g6["pair_gate"]["report_only"][:len(g5["pair_gate"]["report_only"])], g5["pair_gate"]["report_only"])
+        self.assertIn("K3 → K4", " ".join(g6["pair_gate"]["report_only"]))
+        self.assertEqual(g6["cell_check"]["recipe"], ["train-r2", "train-g1-arch", "train-g3-ko", "train-g4-bal"])
+        self.assertEqual((g6["cell_check"]["dev"], g6["cell_check"]["thin"]), ("dev-cmp-g4", 10))
+        with open(PROTOCOL_G6, encoding="utf-8") as f:
+            self.assertNotIn("TODO", f.read())
+
+    def test_old_alarms_same_as_g5(self):
+        # 같은 판 짝에서 g6 의 옛 경보 여섯 줄 결과는 g5 와 같다 — 새 줄은 뒤에 붙기만 한다
+        g5_dir = os.path.join(self._tmp.name, "g5")
+        os.makedirs(g5_dir)
+        g5_fx = Fixture(g5_dir, PROTOCOL_G5)
+        p5, s5 = g5_fx.stats(ko_c_miss_pred, en_d_broken_pred)
+        p6, s6 = self.fx.stats(ko_c_miss_pred, en_d_broken_pred)
+        old, new = cmp.verdict(p5, s5)["alarms"], cmp.verdict(p6, s6)["alarms"]
+        self.assertEqual(new[:len(old)], old)
+        self.assertNotIn("pred_shift", s5)                         # 옛 규약 출력 칸은 그대로
+
+    def test_too_high_fires(self):
+        # ko c 0 → 1 : c_recall@ko · c_recall 평균 차 +1 > .20 · en d 1 → 0 은 내려감이라 「너무 오름」 아님
+        protocol, stats = self.fx.stats(ko_c_miss_pred, en_d_broken_pred)
+        alarms = cmp.verdict(protocol, stats)["alarms"]
+        self.assertIn("c_recall@ko 평균 차 +1.0000 > 0.2", alarms)
+        self.assertIn("c_recall 평균 차 +0.6000 > 0.2", alarms)       # c 다섯 중 ko 셋만 오름 → 3/5
+        self.assertFalse([a for a in alarms if a.startswith("d_recall") and "> 0.2" in a])
+
+    def test_too_high_quiet_when_small(self):
+        protocol, stats = self.fx.stats(base_pred, base_pred)
+        self.assertFalse([a for a in cmp.verdict(protocol, stats)["alarms"] if "> 0.2" in a])
+
+    def test_pred_shift_fires_with_min_n(self):
+        # jira(en) d 8쌍이 다 c 로 → 정답 d 중 c 몫 0 → 1. min_n 20 이면 8쌍 칸이라 안 센다, 5 면 운다
+        protocol, stats = self.fx.stats(base_pred_all_right, en_d_broken_pred)
+        self.assertEqual(stats["pred_shift"], [])
+        self.assertFalse([a for a in cmp.verdict(protocol, stats)["alarms"] if a.startswith("domain ")])
+        protocol["pair_gate"]["alarms"][-1]["min_n"] = 5
+        _, base = cmp.load_runs(self.fx.runs("B0", base_pred_all_right))
+        _, new = cmp.load_runs(self.fx.runs("B1", en_d_broken_pred))
+        stats = cmp.compare(protocol, cmp.read_set(self.fx.set_path), base, new)
+        line = next(r for r in stats["pred_shift"] if r["domain"] == "jira" and r["gold"] == "d" and r["pred"] == "c")
+        self.assertEqual((line["pairs"], line["base"], line["new"], line["diff"]), (8, 0.0, 1.0, 1.0))
+        alarms = cmp.verdict(protocol, stats)["alarms"]
+        self.assertIn("domain jira 정답 d → c 몫 0.0000 → 1.0000 (차 +1.0000 > 0.3)", alarms)
+        self.assertEqual(len([a for a in alarms if a.startswith("domain ")]), 1)
+
+    def test_expand_alarm(self):
+        specs = cmp.expand_alarm({"metric": "recalls", "langs": ["", "ko"], "max_mean_diff": 0.2})
+        self.assertEqual([cmp.ruler_name(s) for s in specs],
+                         ["a_recall", "b_recall", "c_recall", "d_recall",
+                          "a_recall@ko", "b_recall@ko", "c_recall@ko", "d_recall@ko"])
+        one = {"metric": "b_recall", "lang": "ko", "min_mean_diff": -0.03}
+        self.assertEqual(cmp.expand_alarm(one), [one])
+
+
 class OldFormCompatTest(unittest.TestCase):
     """옛 꼴(metric 문자열만)은 이름 · 지표 표가 그대로다 — g2 출력에 @ 자가 안 끼어든다."""
 

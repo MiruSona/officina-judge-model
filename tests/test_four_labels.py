@@ -38,6 +38,7 @@ CRIT4 = prereg.criteria_from_gate(protocol_gate())
 PROTOCOL_G2 = os.path.join(os.path.dirname(prereg.DEFAULT_PROTOCOL), "protocol-g2.json")
 PROTOCOL_G4 = os.path.join(os.path.dirname(prereg.DEFAULT_PROTOCOL), "protocol-g4.draft.json")
 PROTOCOL_G5 = os.path.join(os.path.dirname(prereg.DEFAULT_PROTOCOL), "protocol-g5.draft.json")
+PROTOCOL_G6 = os.path.join(os.path.dirname(prereg.DEFAULT_PROTOCOL), "protocol-g6.draft.json")
 
 
 def protocol_gate_g2():
@@ -503,6 +504,17 @@ class PreregFourTest(unittest.TestCase):
         self.assertNotEqual(got["next"], prereg.NEXT_G4)
         self.assertEqual(got["next"]["p95_only"], "int8 → 그래도 넘으면 K3 는 내지 않고 8092 는 v1.1.0 유지")
         self.assertEqual(got["next"]["fail"], "출시 관문 미달 — K3 는 내지 않고 8092 는 v1.1.0 유지 · blind-g4 는 쓴 셋")
+        self.assertEqual(got["release_gate"], gate)
+
+    def test_g6_protocol_next_is_k4_round(self):
+        # 원천 균형 판 설계 5-5 ⑦ : protocol-g6 박제는 K4 문구 — K3(g5) 문구를 박지 않는다
+        with open(PROTOCOL_G6, encoding="utf-8") as f:
+            gate = json.load(f)["release_gate"]
+        got = prereg.build(self.four_spec(), {}, set(), set(), {"release_gate": gate}, "/x/protocol-g6.json", "e" * 64)
+        self.assertEqual(got["next"], prereg.NEXT_G6)
+        self.assertNotEqual(got["next"], prereg.NEXT_G5)
+        self.assertEqual(got["next"]["p95_only"], "int8 → 그래도 넘으면 K4 는 내지 않고 8092 는 v1.1.0 유지")
+        self.assertEqual(got["next"]["fail"], "출시 관문 미달 — K4 는 내지 않고 8092 는 v1.1.0 유지 · blind-g4 는 쓴 셋")
         self.assertEqual(got["release_gate"], gate)
 
     def test_unknown_vs_ref_protocol_needs_next(self):

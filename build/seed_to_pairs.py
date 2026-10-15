@@ -32,18 +32,29 @@ def write_jsonl(path, rows):
 
 
 def seed_pairs(row):
-    """씨앗 한 줄 → 쌍 줄들 (b 는 늘 · a · d 는 있을 때만). 근거 = 씨앗, 주장 = 다듬은 줄."""
+    """씨앗 한 줄 → 쌍 줄들 (b 는 늘 · a · d 는 있을 때만). 근거 = 씨앗, 주장 = 다듬은 줄.
+    씨앗 줄에 evidence(문단)가 있으면(seed_contrast --evidence paragraph, K4 archive) 근거 = 그 문단 · domain = 줄의 domain ·
+    form = seed-<칸> · origin = g4-seed. 없으면 옛 꼴 그대로.
+    줄에 lines 가 없고 drafts(seed_contrast make 의 규칙 초안)가 있으면 drafts 를 그대로 쓰고
+    쌍 줄에 lines_from = rule-draft 를 남긴다. lines 가 있으면 옛 출력 그대로."""
+    paragraph = row.get("evidence_mode") == "paragraph"
+    from_draft = "lines" not in row and isinstance(row.get("drafts"), dict)
+    lines = row["drafts"] if from_draft else (row.get("lines") or {})
     out = []
     for hint in HINTS:
-        claim = (row.get("lines") or {}).get(hint)
+        claim = lines.get(hint)
         if not isinstance(claim, str) or not claim.strip():
             continue
         out.append({
-            "id": f"seed-{row['seed_id']}-{hint}", "evidence": row["seed"], "claim": claim, "want": "",
-            "hint": hint, "form": "contrast", "domain": "seed", "group": row["group"], "groups": [row["group"]],
-            "lang": "ko", "lic": "MIT", "split": "train", "src_ids": [row["seed_id"]], "origin": "g3-seed",
+            "id": f"seed-{row['seed_id']}-{hint}", "evidence": row["evidence"] if paragraph else row["seed"],
+            "claim": claim, "want": "", "hint": hint, "form": f"seed-{hint}" if paragraph else "contrast",
+            "domain": row.get("domain", "archive") if paragraph else "seed", "group": row["group"], "groups": [row["group"]],
+            "lang": "ko", "lic": "MIT", "split": "train", "src_ids": [row["seed_id"]],
+            "origin": "g4-seed" if paragraph else "g3-seed",
             "pair": row["seed_id"], "slot_kind": (row.get("slot") or {}).get("kind"),
         })
+        if from_draft:
+            out[-1]["lines_from"] = "rule-draft"
     return out
 
 

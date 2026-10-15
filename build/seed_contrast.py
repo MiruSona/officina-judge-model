@@ -7,6 +7,13 @@
     python -I seed_contrast.py check --in <생성 결과 또는 input.jsonl> [--out 결과.jsonl]  # 기계 검사 (한 덩이 · 새 값 · 길이 · 물음꼴 · 부정어 · scrub)
 
 게임 저장소 문장은 쓰지 않는다. 금지 목록(g1 · g2 평가 묶음 · blind-g2.forbid · use1 · 잣대 기억)에 걸린 문서 · 기억은 통째로 뺀다.
+
+K4 archive 씨앗 (원천 균형 판 설계 3-2) — 근거를 씨앗 문장 하나가 아니라 그 문장이 든 문단으로 :
+    python -I seed_contrast.py count --out ~/.judgemodel/build/g4/seed-arch --evidence paragraph [--exclude-seeds <K 씨앗 input.jsonl>]
+    python -I seed_contrast.py make  --out ~/.judgemodel/build/g4/seed-arch --evidence paragraph --domain archive --n 170
+paragraph 꼴은 문서 씨앗만 쓰고(기억 씨앗은 문단이 없어 뺀다), K seed 씨앗 문장(기본 <judge-root>/build/g3/seed/input.jsonl)은 뺀다.
+make 줄에 evidence(문단) · domain · evidence_mode 칸이 붙고 seed_id 는 「ka」 머리다(K 의 「k」 와 안 겹치게).
+기본값(--evidence seed)이면 옛 출력과 바이트 단위로 같다.
 """
 import argparse
 import collections
@@ -33,13 +40,18 @@ SEED = 20261301
 TARGET = 450
 SAMPLE = 50
 GROUP_CAP = 3                    # 한 문서 · 한 기억 덩이에서 뽑는 씨앗 상한 — 문서 하나로 쏠리지 않게
+PARA_GROUP_CAP = 2               # paragraph 꼴 묶음 상한 — 학습 층 「묶음당 2」 규칙에 맞춘다 (원천 균형 판)
 SEED_LEN = (15, 220)
+PARA_SPAN = 1                    # paragraph 꼴 문단 = 같은 절에서 씨앗 문장 앞뒤로 이만큼 (최대 세 문장)
+PARA_ID = "ka"                   # paragraph 꼴 seed_id 머리 — K 씨앗(k0001…)과 안 겹치게
 MAX_SLOTS = 6                    # 값 자리가 이보다 많으면 표 · 나열 글로 보고 뺀다
 KINDS = ("num", "date", "ord", "onoff", "bound", "firstlast", "who")
 TIME_KINDS = ("date",)
 WEIGHTS = {"num": 4, "date": 2}  # 한 바퀴에 고르는 수 (나머지 종류 1) — 수 자리가 가장 많고 설계 보기(「3월 120만」)도 수다
 G1_EVAL = ("dev-cal", "dev-cmp", "blind-g1", "ood-g1")
 G2_EVAL = ("dev-cmp-g2", "dev-cal-g2", "blind-g2")
+G3_EVAL = ("dev-cmp-g3", "dev-cal-g3", "blind-g3")   # paragraph 꼴(K4 archive)만 더 본다 — 옛 seed 꼴 출력은 그대로
+G4_EVAL = ("dev-cmp-g4", "blind-g4")
 INSTRUCTION = ("문장 다듬기만 한다 : 초안의 조사 · 단위 · 띄어쓰기만 자연스럽게 고친다. "
                "바꾼 자리 밖의 낱말 · 값은 씨앗 그대로 두고, 새 값을 바꾸거나 부정어(않다 · 안 · 못 · 아니다)를 넣지 않는다.")
 
@@ -398,24 +410,31 @@ def group_to_key(group):
 
 
 class SeedForbid:
-    """씨앗이 피할 것 — 문서 경로 · 기억 id · 기억 덩이 · 평가 · use1 문장."""
+    """씨앗이 피할 것 — 문서 경로 · 기억 id · 기억 덩이 · 평가 · use1 문장.
+    evidence 가 paragraph(K4 archive)면 g3 평가 셋 셋 · g4 평가 셋 둘 묶음 · 글과 blind-g3/g4.forbid.json 도 더한다."""
 
-    def __init__(self, judge_root, studio_root=None, git_files=None):
+    def __init__(self, judge_root, studio_root=None, git_files=None, evidence="seed"):
         self.missing = []
         self.docs, self.mem_groups, self.mem_ids, self.texts = set(), set(), set(), set()
         self.ruler_ids = set()
         eval_paths = [os.path.join(judge_root, "sets", "g1", n + ".jsonl") for n in G1_EVAL]
         eval_paths += [os.path.join(judge_root, "sets", "g2", n + ".jsonl") for n in G2_EVAL]
+        forbids = ["g2"]
+        if evidence == "paragraph":
+            eval_paths += [os.path.join(judge_root, "sets", "g3", n + ".jsonl") for n in G3_EVAL]
+            eval_paths += [os.path.join(judge_root, "sets", "g4", n + ".jsonl") for n in G4_EVAL]
+            forbids += ["g3", "g4"]
         for path in eval_paths:
             if not os.path.exists(path):
                 self.missing.append(os.path.relpath(path, judge_root))
                 continue
             self._eat_rows(path)
-        forbid_path = os.path.join(judge_root, "sets", "g2", "blind-g2.forbid.json")
-        if os.path.exists(forbid_path):
-            self._eat_forbid(forbid_path, studio_root, git_files or _git_files)
-        else:
-            self.missing.append("blind-g2.forbid.json")
+        for gen in forbids:
+            forbid_path = os.path.join(judge_root, "sets", gen, f"blind-{gen}.forbid.json")
+            if os.path.exists(forbid_path):
+                self._eat_forbid(forbid_path, studio_root, git_files or _git_files)
+            else:
+                self.missing.append(f"blind-{gen}.forbid.json")
         use1 = os.path.join(judge_root, "measure", "use1")
         use1_files = sorted(glob.glob(os.path.join(use1, "*", "*.jsonl")))
         if not use1_files:
@@ -511,16 +530,33 @@ def norm(text):
 
 # ---------------------------------------------------------------- 씨앗 세기
 
-def read_sources(studio_root):
-    """스튜디오 문서(Docs 아래 md) · 기억 → 문장 줄 [{source, path|mem_id, group, text}]."""
+def _paragraphs(doc):
+    """문서 하나 → {문장: 그 문장이 든 문단}. 문단 = 같은 절(머리말 앞 글은 그 덩이)의 쓸 문장 중 앞뒤 PARA_SPAN 문장을 이은 글.
+    같은 문장이 여러 번 나오면 처음 자리를 쓴다."""
+    out = {}
+    for sentences in [doc["intro_ok"]] + [[t for t in ss if ma.arch_text_ok(t)] for _, ss in doc["sections"]]:
+        for i, text in enumerate(sentences):
+            out.setdefault(text, " ".join(sentences[max(0, i - PARA_SPAN):i + PARA_SPAN + 1]))
+    return out
+
+
+def read_sources(studio_root, evidence="seed"):
+    """스튜디오 문서(Docs 아래 md) · 기억 → 문장 줄 [{source, path|mem_id, group, text}].
+    evidence 가 paragraph 면 문서 줄에 paragraph 칸을 붙이고 기억 줄은 안 읽는다(문단이 없다)."""
     rows = []
     for doc in ma.read_docs([("studio", studio_root)]):
+        if evidence == "paragraph":
+            paras = _paragraphs(doc)
+            for text in list(doc["intro_ok"]) + [s for _, s in doc["flat"]]:
+                rows.append({"source": "doc", "path": unicodedata.normalize("NFC", doc["rel"]), "mem_id": "",
+                             "group": f"doc:studio:{doc['rel']}", "text": text, "paragraph": paras[text]})
+            continue
         sentences = list(doc["intro_ok"]) + [s for _, s in doc["flat"]]
         for text in sentences:
             rows.append({"source": "doc", "path": unicodedata.normalize("NFC", doc["rel"]), "mem_id": "",
                          "group": f"doc:studio:{doc['rel']}", "text": text})
     store = os.path.join(studio_root, "Memory", "store")
-    if os.path.isdir(store):
+    if evidence != "paragraph" and os.path.isdir(store):
         mems = ma.read_mem_store(store, "studio")
         groups = ma.mem_groups(mems)
         for mid, mem in mems.items():
@@ -547,8 +583,18 @@ def is_question(text):
     return tail.endswith("?") or bool(re.search(r"(까|나요|가요|니)[.]?$", tail))
 
 
-def count_seeds(rows, forbid, scrubber):
-    """문장 줄 → (쓸 씨앗, 셈). 같은 문장은 한 번만."""
+def read_exclude(paths):
+    """K 씨앗 파일들(input.jsonl · out-*.jsonl 꼴, seed 칸) → 뺄 문장 열쇠 집합."""
+    keys = set()
+    for path in paths:
+        for row in lb.read_jsonl(path):
+            if row.get("seed"):
+                keys.add(norm(row["seed"]))
+    return keys
+
+
+def count_seeds(rows, forbid, scrubber, exclude=frozenset()):
+    """문장 줄 → (쓸 씨앗, 셈). 같은 문장은 한 번만. exclude(정규화 문장)에 든 문장은 「k_seed」로 뺀다."""
     count = collections.Counter()
     kinds_before, kinds_after = collections.Counter(), collections.Counter()
     by_source = collections.Counter()
@@ -559,6 +605,9 @@ def count_seeds(rows, forbid, scrubber):
             count["dup"] += 1
             continue
         seen.add(key)
+        if key in exclude:
+            count["k_seed"] += 1
+            continue
         why = seed_ok(row["text"])
         if why:
             count[f"skip_{why}"] += 1
@@ -577,6 +626,8 @@ def count_seeds(rows, forbid, scrubber):
         cleaned = scrubber.apply({"evidence": row["text"]}, collections.Counter())
         if cleaned is None or sum(scrubber.hits({"evidence": row["text"]}).values()):
             reasons.append("scrub")
+        elif "paragraph" in row and sum(scrubber.hits({"evidence": row["paragraph"]}).values()):
+            reasons.append("scrub_paragraph")
         if reasons:
             count["forbidden"] += 1
             for r in reasons:
@@ -687,8 +738,12 @@ def _take(kind, queues, pos, used, per_group, picked, group_cap, seed):
     return False
 
 
-def choose(seeds, n=TARGET, seed=SEED, group_cap=GROUP_CAP, weights=None):
-    """씨앗 n 개 — 종류를 무게(WEIGHTS)대로 돌아가며 고른다. 같은 종류 안에서는 d 를 만들 수 있는 씨앗 먼저, 묶음마다 group_cap 까지."""
+def choose(seeds, n=TARGET, seed=SEED, group_cap=None, weights=None, evidence="seed", domain=None):
+    """씨앗 n 개 — 종류를 무게(WEIGHTS)대로 돌아가며 고른다. 같은 종류 안에서는 d 를 만들 수 있는 씨앗 먼저, 묶음마다 group_cap 까지
+    (기본 seed 꼴 GROUP_CAP · paragraph 꼴 PARA_GROUP_CAP).
+    evidence 가 paragraph 면 줄에 evidence(씨앗 문장이 든 문단) · domain · evidence_mode 를 붙이고 seed_id 머리를 PARA_ID 로."""
+    if group_cap is None:
+        group_cap = PARA_GROUP_CAP if evidence == "paragraph" else GROUP_CAP
     weights = weights or WEIGHTS
     rng = random.Random(seed)
     order = list(seeds)
@@ -708,10 +763,14 @@ def choose(seeds, n=TARGET, seed=SEED, group_cap=GROUP_CAP, weights=None):
                 if not _take(kind, queues, pos, used, per_group, picked, group_cap, seed):
                     active.remove(kind)
     out = []
+    head = PARA_ID if evidence == "paragraph" else "k"
     for i, (row, plan) in enumerate(picked):
         lines = ["b", "a", "d"] if plan["d"] else ["b", "a"]
-        out.append({"seed_id": f"k{i + 1:04d}", "source": row["source"], "group": row["group"], "seed": row["text"],
-                    **plan, "want_lines": lines, "instruction": INSTRUCTION})
+        line = {"seed_id": f"{head}{i + 1:04d}", "source": row["source"], "group": row["group"], "seed": row["text"],
+                **plan, "want_lines": lines, "instruction": INSTRUCTION}
+        if evidence == "paragraph":
+            line.update(evidence=row["paragraph"], domain=domain or "archive", evidence_mode="paragraph")
+        out.append(line)
     return out
 
 
@@ -902,15 +961,24 @@ def _guard_out(path, allow_git):
 
 def cmd_count(a):
     _guard_out(a.out, a.allow_git)
-    forbid = SeedForbid(a.judge_root, a.studio)
+    forbid = SeedForbid(a.judge_root, a.studio, evidence=a.evidence)
     if forbid.missing and not a.allow_missing:
         sys.exit(f"금지 목록 파일이 없다 : {forbid.missing}")
-    rows = read_sources(a.studio)
-    seeds, report = count_seeds(rows, forbid, _scrubber(a))
+    exclude_paths = a.exclude_seeds
+    if exclude_paths is None and a.evidence == "paragraph":
+        exclude_paths = [os.path.join(a.judge_root, "build", "g3", "seed", "input.jsonl")]
+    missing = [p for p in exclude_paths or [] if not os.path.exists(p)]
+    if missing and not a.allow_missing:
+        sys.exit(f"K 씨앗 파일이 없다 : {missing}")
+    exclude = read_exclude([p for p in exclude_paths or [] if os.path.exists(p)])
+    rows = read_sources(a.studio, a.evidence)
+    seeds, report = count_seeds(rows, forbid, _scrubber(a), exclude)
     lb.write_jsonl(os.path.join(a.out, "seeds-all.jsonl"), seeds)
     report.update({"sentences": len(rows), "forbid_docs": len(forbid.docs), "forbid_mem_ids": len(forbid.mem_ids),
                    "forbid_mem_groups": len(forbid.mem_groups), "forbid_texts": len(forbid.texts),
                    "missing": forbid.missing, "target": TARGET})
+    if a.evidence != "seed":          # 옛 기본값이면 count.json 칸을 늘리지 않는다
+        report.update({"evidence": a.evidence, "exclude_seeds": len(exclude)})
     lb.write_json(os.path.join(a.out, "count.json"), report)
     print(json.dumps(report, ensure_ascii=False))
     if report["count"].get("kept", 0) < TARGET:
@@ -931,7 +999,9 @@ def refresh_slots(seeds):
 def cmd_make(a):
     _guard_out(a.out, a.allow_git)
     seeds = refresh_slots(lb.read_jsonl(os.path.join(a.out, "seeds-all.jsonl")))
-    rows = choose(seeds, a.n, a.seed)
+    if a.evidence == "paragraph" and any("paragraph" not in r for r in seeds):
+        sys.exit("seeds-all 에 paragraph 칸이 없다 — count 를 --evidence paragraph 로 다시 돌린다")
+    rows = choose(seeds, a.n, a.seed, evidence=a.evidence, domain=a.domain)
     rng = random.Random(a.seed + 1)
     sample = sorted(rng.sample(rows, min(SAMPLE, len(rows))), key=lambda r: r["seed_id"])
     lb.write_jsonl(os.path.join(a.out, "input.jsonl"), rows)
@@ -944,6 +1014,8 @@ def cmd_make(a):
               "by_source": dict(collections.Counter(r["source"] for r in rows)),
               "with_d": sum(1 for r in rows if r["d"]), "a_rule": sum(1 for r in rows if r["a_mode"] == "rule"),
               "groups": len({r["group"] for r in rows})}
+    if a.evidence != "seed":
+        report.update({"evidence": a.evidence, "domain": a.domain})
     lb.write_json(os.path.join(a.out, "make.json"), report)
     print(json.dumps(report, ensure_ascii=False))
     return 0
@@ -970,6 +1042,11 @@ def main(argv=None):
         p.add_argument("--allow-git", action="store_true", help="시험용 — git 안에 써도 된다")
     for name in ("count", "make"):
         sub.choices[name].add_argument("--out", required=True)
+        sub.choices[name].add_argument("--evidence", choices=("seed", "paragraph"), default="seed",
+                                       help="근거 꼴 — seed(씨앗 문장, K) · paragraph(씨앗 문장이 든 문단, K4 archive)")
+    sub.choices["count"].add_argument("--exclude-seeds", nargs="*", default=None,
+                                      help="뺄 K 씨앗 파일 (seed 칸). paragraph 꼴 기본 <judge-root>/build/g3/seed/input.jsonl")
+    sub.choices["make"].add_argument("--domain", default="archive", help="paragraph 꼴 줄의 domain (기본 archive)")
     sub.choices["count"].add_argument("--studio", default=_default_studio(), help="스튜디오 뿌리")
     sub.choices["count"].add_argument("--allow-missing", action="store_true", help="시험용 — 금지 목록 파일이 없어도 돈다")
     sub.choices["make"].add_argument("--n", type=int, default=TARGET)

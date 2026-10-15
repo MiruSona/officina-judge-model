@@ -241,11 +241,24 @@ def slice_compare(protocol, set_rows, base, new, spec):
     return s
 
 
+RECALLS = ("a_recall", "b_recall", "c_recall", "d_recall")
+
+
+def expand_alarm(alarm):
+    """경보 한 줄 → 자 목록. 「너무 오름」 묶음 꼴 {"metric": "recalls", "langs": ["", "ko", "en"], "max_mean_diff": .2} 은
+    네 재현 × 언어(빈 글자 = 쌍 전체)로 편다. 그 밖 줄은 그대로 한 자다."""
+    if alarm.get("metric") != "recalls":
+        return [alarm]
+    return [dict({"metric": m, "max_mean_diff": alarm["max_mean_diff"]}, **({"lang": lang} if lang else {}))
+            for lang in alarm.get("langs", [""]) for m in RECALLS]
+
+
 def gate_slice_specs(protocol):
     """pair_gate 의 목표 · 지킴 · 경보 중 걸러 쓴 자 (나온 차례, 같은 이름은 하나)."""
     gate = protocol.get("pair_gate", {})
     specs = {}
-    for spec in [gate.get("target", {})] + gate.get("guards", []) + gate.get("alarms", []):
+    alarms = [spec for alarm in gate.get("alarms", []) for spec in expand_alarm(alarm)]
+    for spec in [gate.get("target", {})] + gate.get("guards", []) + alarms:
         if spec.get("metric") in METRICS and is_slice(spec):
             specs.setdefault(ruler_name(spec), spec)
     return list(specs.values())
@@ -452,6 +465,34 @@ def by_table(set_rows, ids, base, new, keys):
     return out
 
 
+def shift_alarm(protocol):
+    """pair_gate.alarms 의 원천별 쏠림 줄 (없으면 None)."""
+    return next((a for a in protocol.get("pair_gate", {}).get("alarms", []) if a.get("metric") == "pred_shift"), None)
+
+
+def pred_shift(set_rows, base, new, key="domain", min_n=20):
+    """원천(key 칸)마다 정답 x 중 y 로 본 몫(x≠y, 씨앗 평균)의 base · new · 차. 정답 x 가 min_n 쌍 이상인 칸만 센다.
+    → [{key, gold, pred, pairs, base, new, diff}] (원천 · 정답 · 답 차례). 진단용 — 판정은 안 바꾼다."""
+    buckets = {}
+    for pos, pid in enumerate(base["ids"]):
+        gold = base["gold"][pos]
+        if gold not in range(len(LETTERS)):
+            continue
+        buckets.setdefault((str(set_rows.get(pid, {}).get(key, "-")), gold), []).append(pos)
+    out = []
+    for (value, gold), positions in sorted(buckets.items()):
+        if len(positions) < min_n:
+            continue
+        for pred in range(len(LETTERS)):
+            if pred == gold:
+                continue
+            share_b = sum(base["counts"][i][pred] for i in positions) / (len(positions) * base["seeds"])
+            share_n = sum(new["counts"][i][pred] for i in positions) / (len(positions) * new["seeds"])
+            out.append({key: value, "gold": LETTERS[gold], "pred": LETTERS[pred], "pairs": len(positions),
+                        "base": round(share_b, 4), "new": round(share_n, 4), "diff": round(share_n - share_b, 4)})
+    return out
+
+
 def compare(protocol, set_rows, base_runs, new_runs):
     """두 조건의 쌍 표 · 지표별 구간 · McNemar · 거짓 지지 · 곁 자 · 보고만 칸."""
     ids = [pid for pid in set_rows]
@@ -475,6 +516,9 @@ def compare(protocol, set_rows, base_runs, new_runs):
     stats["side"] = {"base": side_means(base_runs, side_names), "new": side_means(new_runs, side_names)}
     stats["by_lang"] = by_table(set_rows, base["ids"], base, new, ["lang"])
     stats["sure"] = {"base": sure_report(base_runs, base["ids"]), "new": sure_report(new_runs, new["ids"])}
+    shift = shift_alarm(protocol)
+    if shift is not None:          # 옛 규약(경보 줄 없음)의 출력 칸은 그대로 둔다
+        stats["pred_shift"] = pred_shift(set_rows, base, new, shift.get("by", "domain"), shift.get("min_n", 20))
     pick = protocol.get("release_pick", {})
     stats["release_pick"] = pick_release(new_runs, base["ids"], pick.get("metric", "d_recall"), set_rows, pick)
     stats["_tables"] = (base, new)
@@ -518,6 +562,21 @@ def verdict(protocol, stats):
         guards.append({"metric": ruler_name(guard), "ok": ok, "note": note})
     alarms = []
     for alarm in gate.get("alarms", []):
+        if alarm["metric"] == "pred_shift":
+            key = alarm.get("by", "domain")
+            for line in stats.get("pred_shift", []):
+                if line["diff"] > alarm["max_shift"]:
+                    alarms.append(f"{key} {line[key]} 정답 {line['gold']} → {line['pred']} 몫 "
+                                  f"{line['base']:.4f} → {line['new']:.4f} (차 {line['diff']:+.4f} > {alarm['max_shift']})")
+            continue
+        if alarm["metric"] == "recalls" or "max_mean_diff" in alarm:
+            # 너무 오름 (g6) — 평균 차가 max_mean_diff 를 넘으면 (K3 의 d@en +.315 같은 쏠림)
+            for spec in expand_alarm(alarm):
+                name = ruler_name(spec)
+                diff = stats["metrics"][name]["diff"]
+                if diff is not None and diff > spec["max_mean_diff"]:
+                    alarms.append(f"{name} 평균 차 {diff:+.4f} > {spec['max_mean_diff']}")
+            continue
         if alarm["metric"] == "k48_hits":
             sn = stats["side"]["new"] or {}
             if sn.get("k48_hits") is not None and sn["k48_hits"] < alarm["min"]:

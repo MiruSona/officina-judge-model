@@ -2,8 +2,11 @@
 
 test_assemble_g3 의 시험을 g4 이름으로 옮기고 min_groups · 이은 줄 바이트를 더했다. 글은 모두 지어낸 것이다.
 """
+import importlib.util
+import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -217,6 +220,185 @@ class CheckTest(unittest.TestCase):
         with mock.patch("sys.stdout"), mock.patch("sys.stderr"):
             self.assertEqual(ag.main(args), 2)
             self.assertEqual(ag.main(args + ["--draft"]), 0)
+
+
+class Out(io.StringIO):
+    """화면 받이 — main 이 부르는 reconfigure 를 받아 넘긴다."""
+
+    def reconfigure(self, **kwargs):
+        pass
+
+
+def cell_row(rid, domain, want):
+    row = {"id": rid, "evidence": f"근거 {rid}", "claim": f"주장 {rid}", "want": want, "lang": "ko", "group": f"cg:{rid}"}
+    if domain is not None:
+        row["domain"] = domain
+    return row
+
+
+class CellGapsTest(unittest.TestCase):
+    """원천 × 칸 빈칸 검사 (원천 균형 판 설계 4절)."""
+
+    def test_word_and_letter_cells_count_same(self):
+        train = [cell_row("t1", "kowiki", "unrelated"), cell_row("t2", "kowiki", "c"), cell_row("t3", "kowiki", "related")]
+        dev = [cell_row("d1", "kowiki", "c"), cell_row("d2", "kowiki", "d")]
+        got = ag.cell_gaps(train, dev, thin=1)
+        self.assertEqual(got["table"]["kowiki"], {"a": [0, 0], "b": [0, 0], "c": [2, 1], "d": [1, 1]})
+        self.assertEqual((got["zero"], got["thin_cells"], got["dev_missing"]), ([], [], []))
+
+    def test_no_domain_is_mem_and_cd_not_counted(self):
+        train = [cell_row("t1", None, "support"), cell_row("t2", "", "contradict"), cell_row("t3", "mem", "cd"),
+                 cell_row("t4", "archive", "cd")]
+        dev = [cell_row("d1", "mem", "a"), cell_row("d2", "archive", "c")]
+        got = ag.cell_gaps(train, dev)
+        self.assertEqual(got["table"]["mem"], {"a": [1, 1], "b": [1, 0], "c": [0, 0], "d": [0, 0]})
+        self.assertEqual(got["zero"], [{"domain": "archive", "cell": "c", "train": 0, "dev": 1}])  # cd 줄은 c 로 안 센다
+        self.assertEqual(got["thin_cells"], [{"domain": "mem", "cell": "a", "train": 1, "dev": 1}])
+        self.assertEqual(got["dev_missing"], [{"domain": "mem", "cell": "b", "train": 1}])
+
+    def test_thin_edge(self):
+        train = [cell_row(f"t{i}", "vitaminc", "b") for i in range(10)] + [cell_row(f"u{i}", "vitaminc", "a") for i in range(9)]
+        dev = [cell_row("d1", "vitaminc", "b"), cell_row("d2", "vitaminc", "a")]
+        got = ag.cell_gaps(train, dev)
+        self.assertEqual([(c["cell"], c["train"]) for c in got["thin_cells"]], [("a", 9)])   # 10 은 경고 아님
+
+    def write(self, tmp, name, rows):
+        path = os.path.join(tmp, name)
+        ag.write_jsonl(path, rows)
+        return path
+
+    def cells(self, *argv):
+        out = Out()
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr"):
+            code = ag.main(["cells"] + list(argv))
+        return code, json.loads(out.getvalue()) if out.getvalue() else None
+
+    def test_cells_cli_zero_exit1_draft_exit0(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            one = self.write(tmp, "train-a.jsonl", [cell_row("t1", "kowiki", "c")])
+            two = self.write(tmp, "train-b.jsonl", [cell_row("t2", "vitaminc", "a")])
+            dev = self.write(tmp, "dev.jsonl", [cell_row("d1", "kowiki", "c"), cell_row("d2", "proposals", "d")])
+            code, got = self.cells("--build", tmp, "--recipe", "train-a.jsonl", two, "--dev", dev)
+            self.assertEqual(code, 1)
+            self.assertEqual(got["cells"]["zero"], [{"domain": "proposals", "cell": "d", "train": 0, "dev": 1}])
+            self.assertEqual((got["cells"]["recipe"], got["cells"]["dev"], got["cells"]["thin"]),
+                             (["train-a.jsonl", "train-b.jsonl"], "dev.jsonl", 10))
+            self.assertEqual(self.cells("--build", tmp, "--recipe", one, two, "--dev", dev, "--draft")[0], 0)
+
+    def test_cells_cli_thin_only_exit0(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            one = self.write(tmp, "train.jsonl", [cell_row("t1", "kowiki", "c")])
+            dev = self.write(tmp, "dev.jsonl", [cell_row("d1", "kowiki", "c")])
+            code, got = self.cells("--recipe", one, "--dev", dev)
+            self.assertEqual(code, 0)
+            self.assertEqual(len(got["cells"]["thin_cells"]), 1)
+
+    def test_cells_cli_missing_file_exit2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dev = self.write(tmp, "dev.jsonl", [cell_row("d1", "kowiki", "c")])
+            self.assertEqual(self.cells("--recipe", os.path.join(tmp, "없음.jsonl"), "--dev", dev)[0], 2)
+
+
+class CheckRecipeTest(CheckTest):
+    """check --recipe — 빈칸이면 exit 1 (--draft 면 적기만), 안 주면 옛 출력 그대로."""
+
+    def check_out(self, *extra, module=ag):
+        args = ["check", "--dest", self.tmp, "--g3-dir", self.tmp, "--build", os.path.join(self.tmp, "build"),
+                "--protocol", self.protocol, "--names", self.names, "--game-names", self.names, "--train"]
+        out, err = Out(), Out()
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+            code = module.main(args + list(extra))
+        self.err = err.getvalue()
+        return code, out.getvalue()
+
+    def head_module(self):
+        """HEAD 의 assemble_g4.py 를 임시 폴더에 꺼내 읽는다 (git stash 안 씀). git 이 없으면 None."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        try:
+            src = subprocess.run(["git", "show", "HEAD:build/assemble_g4.py"], cwd=root, capture_output=True,
+                                 check=True).stdout
+        except (OSError, subprocess.CalledProcessError):
+            return None
+        path = os.path.join(self.tmp, "head", "assemble_g4_head.py")
+        os.makedirs(os.path.dirname(path))
+        with open(path, "wb") as f:
+            f.write(src)
+        spec = importlib.util.spec_from_file_location("assemble_g4_head", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_recipe_zero_fails_unless_draft(self):
+        # dev-cmp-g4 에는 kowiki c 한 줄 — 학습 파일이 kowiki c 를 안 가지면 빈칸
+        path = os.path.join(self.tmp, "train-x.jsonl")
+        ag.write_jsonl(path, [cell_row("t1", "kowiki", "a")])
+        code, out = self.check_out("--recipe", path)
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out)["cells"]["zero"], [{"domain": "kowiki", "cell": "c", "train": 0, "dev": 1}])
+        self.assertEqual(self.check_out("--recipe", path, "--draft")[0], 0)
+        ag.write_jsonl(path, [cell_row("t1", "kowiki", "unrelated")])
+        self.assertEqual(self.check_out("--recipe", path)[0], 0)          # 1줄이라 thin 경고만
+
+    def test_no_recipe_output_same_as_before(self):
+        head = self.head_module()
+        if head is None:
+            self.skipTest("git show HEAD 를 못 읽는다")
+        path = os.path.join(self.tmp, "train-x.jsonl")
+        ag.write_jsonl(path, [cell_row("t1", "kowiki", "c")])
+        code_head, before = self.check_out(module=head)            # 고치기 전(HEAD) 코드의 실제 출력
+        code_old, old = self.check_out()
+        self.assertEqual((code_head, code_old), (0, 0))
+        self.assertEqual(old, before)
+        self.assertNotIn('"cells"', old)
+        code_new, new = self.check_out("--recipe", path)
+        self.assertEqual(code_new, 0)
+        doc = json.loads(new)
+        self.assertEqual((doc.pop("cells")["recipe"], doc.pop("overlap_extra_recipe"), doc.pop("overlap_skipped_base"),
+                          doc.pop("train_rows")),
+                         (["train-x.jsonl"], ["train-x.jsonl"], [], 1))
+        want = json.loads(old)
+        want.pop("train_rows")
+        self.assertEqual(doc, want)
+
+    def test_recipe_layer_outside_train_counted_in_overlap(self):
+        # --train 에 없는 새 층(recipe 만)에 blind-g4 줄과 같은 글이 있으면 겹침 → exit 1
+        path = os.path.join(self.tmp, "train-g4-bal.jsonl")
+        same = dict(blind_rows(1)[2], id="t-same", group="tg:1", groups=["tg:1"], src_ids=["t-src"], domain="kowiki")
+        ag.write_jsonl(path, [same, cell_row("t1", "kowiki", "c")])
+        code, out = self.check_out("--recipe", path, "--draft")
+        doc = json.loads(out)
+        self.assertEqual(code, 1)
+        self.assertEqual((doc["overlap"]["train_text"], doc["overlap"]["train_key"]), (1, 1))
+        self.assertIn("경고 : 학습 10줄 미만 칸", self.err)                    # thin 은 stderr 경고
+        listed = os.path.join(self.tmp, "build", "train-g4-bal.jsonl")      # --train 에 이미 있으면 두 번 안 센다
+        os.makedirs(os.path.dirname(listed))
+        ag.write_jsonl(listed, [same])
+        code, out = self.check_out("train-g4-bal.jsonl", "--recipe", "train-g4-bal.jsonl", "--draft")
+        doc = json.loads(out)
+        self.assertEqual((doc["train_rows"], doc["overlap"]["train_text"]), (1, 1))
+        self.assertEqual((doc["overlap_extra_recipe"], doc["overlap_skipped_base"]), ([], []))
+
+    def test_base_recipe_layer_not_counted_in_overlap(self):
+        # K 처방 기본 층(train-g1-arch 같은 것)은 평가 셋과 겹쳐도 겹침 셈에서 빠진다 → exit 0, 두 칸에 적힌다
+        same = dict(blind_rows(1)[2], id="t-same", group="tg:1", groups=["tg:1"], src_ids=["t-src"], domain="kowiki")
+        base = os.path.join(self.tmp, "train-g1-arch.jsonl")
+        ag.write_jsonl(base, [same, cell_row("t1", "kowiki", "c")])
+        code, out = self.check_out("--recipe", base, "--draft")
+        doc = json.loads(out)
+        self.assertEqual(code, 0)
+        self.assertEqual(sum(doc["overlap"].values()), 0)
+        self.assertEqual((doc["overlap_extra_recipe"], doc["overlap_skipped_base"]), ([], ["train-g1-arch.jsonl"]))
+        newer = os.path.join(self.tmp, "train-g4-bal.jsonl")              # 기본 층이 아닌 층의 겹침은 그대로 센다
+        ag.write_jsonl(newer, [same])
+        code, out = self.check_out("--recipe", base, newer, "--draft")
+        doc = json.loads(out)
+        self.assertEqual(code, 1)
+        self.assertEqual(doc["overlap"]["train_text"], 1)
+        self.assertEqual((doc["overlap_extra_recipe"], doc["overlap_skipped_base"]),
+                         (["train-g4-bal.jsonl"], ["train-g1-arch.jsonl"]))
+
+    def test_recipe_missing_file_stops(self):
+        self.assertEqual(self.check_out("--recipe", os.path.join(self.tmp, "없음.jsonl"))[0], 2)
 
 
 DRAFT = """{
