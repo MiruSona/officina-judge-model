@@ -443,8 +443,12 @@ def check_hashes(protocol, protocol_sha, set_sha, conditions):
 BY_METRICS = ("d_recall", "b_recall", "acc3", "a_recall", "c_recall")
 
 
-def by_table(set_rows, ids, base, new, keys):
-    """--by 표 — 칸 조합마다 d · b · a · c 재현 · 3칸 정확도 (base · new · 차). 점 추정만, 구간 없음."""
+WEAK_MIN = 30   # 정답 칸 쌍이 이 수 미만이면 「판정 약함」 표시 (K5 설계 3-4 · 판정 · 경보는 안 바꾼다)
+
+
+def by_table(set_rows, ids, base, new, keys, weak_min=WEAK_MIN):
+    """--by 표 — 칸 조합마다 d · b · a · c 재현 · 3칸 정확도 (base · new · 차). 점 추정만, 구간 없음.
+    weak 는 정답 칸 쌍이 1 이상 weak_min 미만인 칸 {칸 글자: 쌍} — 표시만 한다."""
     buckets = {}
     for pos, pid in enumerate(ids):
         row = set_rows.get(pid, {})
@@ -458,6 +462,7 @@ def by_table(set_rows, ids, base, new, keys):
         line = {"key": key, "pairs": len(sub), "d_pairs": sum(1 for g in b["gold"] if g == RELATED),
                 "b_pairs": sum(1 for g in b["gold"] if g == CONTRA),
                 "a_pairs": sum(1 for g in b["gold"] if g == SUPPORT), "c_pairs": sum(1 for g in b["gold"] if g == UNRELATED)}
+        line["weak"] = {c: line[f"{c}_pairs"] for c in "abcd" if 0 < line[f"{c}_pairs"] < weak_min}
         for metric in BY_METRICS:
             rb, rn = rate(b, metric), rate(n, metric)
             line[metric] = {"base": rb, "new": rn, "diff": None if rb is None or rn is None else round(rn - rb, 4)}
@@ -629,15 +634,23 @@ def to_markdown(result):
         if not rows:
             continue
         lines += ["", f"| {title} | 쌍 | d 쌍 | d 재현 base → new (차) | b 쌍 | b 재현 base → new (차) "
-                      "| 3칸 base → new (차) | a 쌍 | a 재현 base → new (차) | c 쌍 | c 재현 base → new (차) |",
-                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+                      "| 3칸 base → new (차) | a 쌍 | a 재현 base → new (차) | c 쌍 | c 재현 base → new (차) | 약함 |",
+                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
         for r in rows:
             d, b, a = r["d_recall"], r["b_recall"], r["acc3"]
             lines.append(f"| {r['key']} | {r['pairs']} | {r['d_pairs']} | {fmt(d['base'])} → {fmt(d['new'])} ({fmt(d['diff'])}) "
                          f"| {r['b_pairs']} | {fmt(b['base'])} → {fmt(b['new'])} ({fmt(b['diff'])}) "
                          f"| {fmt(a['base'])} → {fmt(a['new'])} ({fmt(a['diff'])}) "
-                         f"| {r.get('a_pairs', '—')} | {span(r.get('a_recall'))} | {r.get('c_pairs', '—')} | {span(r.get('c_recall'))} |")
+                         f"| {r.get('a_pairs', '—')} | {span(r.get('a_recall'))} | {r.get('c_pairs', '—')} | {span(r.get('c_recall'))} "
+                         f"| {weak_mark(r.get('weak'))} |")
     return "\n".join(lines) + "\n"
+
+
+def weak_mark(weak):
+    """by 표 「약함」 칸 — {b: 19, d: 4} → 「b 19 · d 4」. 없거나 옛 결과 파일이면 —."""
+    if not weak:
+        return "—"
+    return " · ".join(f"{cell} {n}" for cell, n in sorted(weak.items()))
 
 
 def span(cell):

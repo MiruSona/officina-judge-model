@@ -10,6 +10,9 @@
     → <g4>/train-g4-bal/pick.jsonl · pick-summary.json   (3-1 꼴 다섯)
     python -I layer_g4bal.py build     --g4 … [--v6 …] [--v5 …] [--v5-dirs …] [--dirs …] [--seed-pairs …]
     → <g4>/train-g4-bal/cands.jsonl · summary.json
+    python -I layer_g4bal.py pick-klb  --g4 …   → <g4>/train-g4-klb/pick-ka.jsonl · pick-mrc.jsonl · pick-summary.json   (K5 4-3)
+    python -I layer_g4bal.py build-klb --g4 … [--cands …] [--dirs <g4>/klb/judge]
+    → <g4>/train-g4-klb/cands.jsonl · summary.json   (K5 4-2 조성 — compose_klb)
 
 조립 규칙 (1-1) : 재료 차례는 v6 → v5(실물만) → 새 판정. 원천 × 칸 목표(TARGETS build)를 넘지 않는다.
   짝 꼴(form contrast · seed-*)은 같은 `pair` 줄을 한 묶음으로 몫 안에 다 들 때만 통째로 넣고(깨진 짝 = 한 줄 묶음은 뺀다),
@@ -20,6 +23,7 @@
 """
 import argparse
 import collections
+import hashlib
 import json
 import math
 import os
@@ -30,15 +34,18 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import layer_g4d as ld  # noqa: E402
+import public_pick  # noqa: E402
 from assemble_g3 import Stop, judge_label, load_decisions, resolve  # noqa: E402
 from assemble_g4 import CELL_OF  # noqa: E402
-from label_batches import inside_git, read_jsonl, write_json, write_jsonl  # noqa: E402
+from label_batches import inside_git, load_map, read_jsonl, write_json, write_jsonl  # noqa: E402
 from layer_g3 import merge_targets, recheck  # noqa: E402
 from layer_g4c import _drop_boundary, _refuse_or_move, _targets, make_guard  # noqa: E402
-from make_sets import _SENT_SPLIT, G1_SET_FILES, OLD_SETS, load_old, near_c, norm, pair_key, sha_key  # noqa: E402
+from make_sets import _SENT_SPLIT, G1_SET_FILES, OLD_SETS, ParaIndex, load_old, near_c, norm, pair_key, sha_key  # noqa: E402
 
 SEED = 20261404
+KLB_SEED = 20261505            # build-klb 조성 씨앗
 LAYER = "train-g4-bal"
+KLB_LAYER = "train-g4-klb"     # K5 설계 4-3 — pick-klb 출력 폴더
 CELLS = ("a", "b", "c", "d")
 SKIP_DOMAINS = ("jira", "minicheck")
 UNIT_FORMS = ("contrast",)          # 그 밖에 form 이 seed- 로 시작하는 줄도 짝 묶음이다
@@ -63,6 +70,12 @@ TARGETS = {
     },
     "pick": {BOOLQ: 130, KLUE_ANS: 60, MIT_REV: 180, MIT_NEAR: 45, MIT_OTHER: 75},   # 설계 3-1 후보 열
     "per_group": 2,
+    "klb": {     # K5 설계 4-3 후보 열 — klue-answered 질문(b · a 짝) · klue-mrc unanswerable 같은 묶음 질문
+        "ka": {"b": 225, "a": 85}, "ka_per_group": 2,
+        "mrc": 300, "mrc_min_q": 2, "mrc_per_group": 2,
+        # K5 설계 4-2 「새 층」 열 — build-klb 조성 목표 (원천 × 칸)
+        "build": {"klue-answered": {"a": 80, "b": 200}, "klue-mrc": {"b": 40, "d": 40}},
+    },
     "rate_limit": 0.10,     # 설계 2-3 — 칸별 · 전체 변화율 문턱
     "edges": ld.TARGETS["edges"],
 }
@@ -339,6 +352,312 @@ def pick_new(src, guard, targets=None, seed=SEED, taken=frozenset()):
     return sorted(out, key=lambda r: r["id"]), summary
 
 
+# ---------------------------------------------------------------- K5 train-g4-klb 후보 (K5 설계 4-3)
+
+
+def _layer_marks(layer_rows):
+    """학습 층 줄 → (이미 쓴 KLUE 질문 guid, K4 removed d 의 질문 guid → 그 d 줄 id, 문단 색인).
+    removed d(KLUE_ANS 꼴) 줄은 세 줄 짝의 닻이라 「쓴 질문」 · 문단 색인에 안 넣는다."""
+    used, anchors, para = set(), {}, ParaIndex()
+    for row in layer_rows:
+        if row.get("form") == KLUE_ANS:
+            for src in row.get("src_ids") or []:
+                anchors.setdefault(src, row["id"])
+            continue
+        if str(row.get("domain") or "").startswith("klue"):
+            used.update(row.get("src_ids") or [])
+            if row.get("pair"):
+                used.add(row["pair"])
+        para.add(row, "layer")
+    return used, anchors, para
+
+
+def _klb_id(kind, k, row):
+    # 꼬리 -h 는 src_ids 해시라 assemble_g3.HASH_ID(쌍 해시) 뜻과 다르다 — 얼린 층이라 그대로 두고, 다음 층부터 꼬리 -s
+    return f"klb-{kind}-{k:04d}-h{hashlib.sha256(json.dumps(row.get('src_ids'), ensure_ascii=False).encode('utf-8')).hexdigest()[:8]}"
+
+
+def pick_klb(src, guard, layer_rows, targets=None, seed=SEED, taken=frozenset()):
+    """klue-answered 세 줄 짝(qa-alt b · qa-true a, K4 removed d 닻 먼저) + klue-mrc 같은 문단(묶음) unanswerable 질문
+    → (klue-answered 후보, klue-mrc 후보 — 평서문 전, 요약). 한 질문 줄이 하나라도 걸리면 그 질문을 통째 뺀다.
+    금지 = guard(평가 · forbid.json · 옛 셋 · scrub) + 학습 층(K 처방 · train-g4-c · train-g4-bal) 문단 · 쓴 질문 · 쌍 열쇠."""
+    t = merge_targets(TARGETS, targets)["klb"]
+    used, anchors, para = _layer_marks(layer_rows)
+    dropped = collections.Counter()
+    prepared, why = public_pick.prepare([r for r in src.get("klue_rw") or [] if r.get("split") == "train"], "train",
+                                        drop_ids=public_pick.failed_ids(src.get("klue_check") or []))
+    for key, count in why.items():
+        dropped["ka:" + key] += count
+    by_q = collections.defaultdict(dict)
+    for row in prepared:
+        q = row.get("pair") or row["id"]
+        if row["hint"] in by_q[q]:
+            dropped["ka:dup_hint"] += 1          # 뒤 줄이 앞 줄을 덮는다 — cmd_pick_klb 가 경고 한 줄
+        by_q[q][row["hint"]] = row
+
+    def bad(rows, tag):
+        for row in rows:
+            reasons = list(guard.reasons(row))
+            if para.hits(row):
+                reasons.append("layer_para")
+            if row.get("claim") and sha_key(row) in taken:
+                reasons.append("taken")
+            if reasons:
+                dropped.update(f"{tag}:{w}" for w in reasons)
+                return True
+        return False
+
+    questions = []
+    for q in sorted(by_q):
+        rows = [by_q[q][c] for c in ("b", "a") if c in by_q[q]]
+        if "b" not in by_q[q]:
+            dropped["ka:no_b"] += 1
+            continue
+        if q in used or any(s in used for r in rows for s in r.get("src_ids") or []):
+            dropped["ka:used_question"] += 1
+            continue
+        if bad(rows, "ka"):
+            continue
+        questions.append(q)
+    rng = random.Random(f"{seed}:klb:ka")
+    rng.shuffle(questions)
+    rank = {q: (0 if q in anchors else 1 if "a" in by_q[q] else 2) for q in questions}
+    questions.sort(key=lambda q: rank[q])
+    ka, per_group, n = [], collections.Counter(), {"a": 0, "b": 0}
+    for q in questions:
+        if n["b"] >= t["ka"]["b"]:
+            break
+        rows = by_q[q]
+        group = rows["b"]["group"]
+        if per_group[group] >= t["ka_per_group"]:
+            continue
+        per_group[group] += 1
+        for cell in ("b", "a"):
+            if cell not in rows or n[cell] >= t["ka"][cell]:
+                continue
+            row = {k: v for k, v in rows[cell].items() if k not in ("judge", "status", "votes")}
+            row.update(want="", set=KLB_LAYER, origin="g4-train", pick=f"ka-{cell}", trio=rank[q] == 0)
+            if q in anchors:
+                row["anchor"] = anchors[q]
+            n[cell] += 1
+            ka.append(row)
+    for k, row in enumerate(sorted(ka, key=lambda r: (r["pick"], r["id"])), start=1):
+        row["src_id"], row["id"] = row["id"], _klb_id(row["pick"], k, row)
+
+    done = set()
+    for path_rows in src.get("klue_done") or []:
+        done.update((r.get("group"), tuple(r.get("src_ids") or ())) for r in path_rows)
+    by_group = collections.defaultdict(list)
+    for row in sorted(src.get("klue_mrc") or [], key=lambda r: r["id"]):
+        if row.get("split") != "train" or row.get("form") != "unanswerable":
+            continue
+        if (row.get("group"), tuple(row.get("src_ids") or ())) in done:
+            dropped["mrc:rewritten_g1"] += 1
+            continue
+        if any(s in used for s in row.get("src_ids") or []):
+            dropped["mrc:used_question"] += 1
+            continue
+        if bad([row], "mrc"):
+            continue
+        by_group[row["group"]].append(row)
+    groups = [g for g in sorted(by_group) if len(by_group[g]) >= t["mrc_min_q"]]
+    dropped["mrc:one_question_group"] = sum(len(v) for g, v in by_group.items() if len(v) < t["mrc_min_q"])
+    random.Random(f"{seed}:klb:mrc").shuffle(groups)
+    mrc = []
+    for cap in (t["mrc_per_group"], max(len(v) for v in by_group.values()) if by_group else 0):
+        for g in groups:
+            have = sum(1 for r in mrc if r["group"] == g)
+            for row in by_group[g][have:cap]:
+                if len(mrc) >= t["mrc"]:
+                    break
+                mrc.append(dict(row, want="", claim="", needs_rewrite=True, set=KLB_LAYER, origin="g4-train", pick="mrc-u"))
+        if len(mrc) >= t["mrc"]:
+            break
+    mrc.sort(key=lambda r: (r["group"], r["id"]))
+    for k, row in enumerate(mrc, start=1):
+        row["src_id"], row["id"] = row["id"], _klb_id("mrc-u", k, row)
+    summary = {"seed": seed, "targets": t,
+               "ka": {"pool_questions": len(by_q), "usable_questions": len(questions),
+                      "usable_with_a": sum(1 for q in questions if "a" in by_q[q]),
+                      "anchor_questions": sum(1 for q in questions if q in anchors), "anchors_in_k4": len(set(anchors.values())),
+                      "picked": dict(n), "trio_rows": sum(1 for r in ka if r["trio"])},
+               "mrc": {"usable_rows": sum(len(v) for v in by_group.values()), "multi_groups": len(groups),
+                       "multi_rows": sum(len(by_group[g]) for g in groups), "picked": len(mrc),
+                       "picked_groups": len({r["group"] for r in mrc}), "short": t["mrc"] - len(mrc)},
+               "dropped": dict(sorted((k, v) for k, v in dropped.items() if v))}
+    return ka, mrc, summary
+
+
+def judged_keys(dirs):
+    """판정 폴더들 → {후보 id: 판정자가 본 쌍 열쇠(sha_key) 모음}. map/map.jsonl(q → id) × batches/*.jsonl(q → 글).
+    map 이나 batches 가 없거나, 같은 q 의 글이 묶음마다 다르거나, map 의 q 가 묶음에 없으면 Stop."""
+    out = collections.defaultdict(set)
+    for d in dirs:
+        mapping, batch_dir = load_map(d), os.path.join(d, "batches")
+        if not mapping or not os.path.isdir(batch_dir):
+            raise Stop(f"판정 폴더에 map/map.jsonl · batches/ 가 없다 — 판정자가 본 글을 대조할 수 없다 ({d})")
+        seen = {}
+        for name in sorted(os.listdir(batch_dir)):
+            if not name.endswith(".jsonl"):
+                continue
+            for item in read_jsonl(os.path.join(batch_dir, name)):
+                key = sha_key(item)
+                if seen.setdefault(item["q"], key) != key:
+                    raise Stop(f"{name} : 같은 q 의 글이 묶음마다 다르다")
+        for m in mapping:
+            if m.get("trap"):
+                continue
+            if m["q"] not in seen:
+                raise Stop(f"map 의 q 가 묶음에 없다 ({d})")
+            out[m["id"]].add(seen[m["q"]])
+    return dict(out)
+
+
+def check_judged_text(cands, decisions, keys):
+    """판정이 있는 후보마다 판정자가 본 글 = 후보 쌍인지 본다. 다르거나 본 글이 없으면 Stop.
+    klb id 꼬리 해시는 src_ids 해시라 assemble_g3.resolve(id 꼬리 쌍 해시 대조)를 못 쓴다 — 그래서 따로 둔다."""
+    for row in cands:
+        if row["id"] not in decisions:
+            continue
+        if keys.get(row["id"]) != {sha_key(row)}:
+            raise Stop(f"{row['id']} : 판정자가 본 쌍과 후보 쌍이 다르다 (또는 map 에 없다)")
+
+
+def klb_labels(cands, decisions):
+    """후보 id → 판정 칸 (agree · third 이고 칸이 a~d 일 때만, 그 밖 · 판정 없음은 "")."""
+    out = {}
+    for row in cands:
+        dec = decisions.get(row["id"]) or {}
+        ok = dec.get("status") in ("agree", "third") and dec.get("label") in CELLS
+        out[row["id"]] = dec["label"] if ok else ""
+    return out
+
+
+class _KlbPlacer:
+    """compose_klb 의 자리 셈 — 원천 × 칸 목표 안에서만 넣는다."""
+
+    def __init__(self, build_t, dec):
+        self.build_t, self.dec = build_t, dec
+        self.got, self.placed = collections.defaultdict(list), set()
+
+    def room(self, domain, cell):
+        return len(self.got[(domain, cell)]) < self.build_t.get(domain, {}).get(cell, 0)
+
+    def put(self, row, cell, how):
+        if not self.room(row["domain"], cell):
+            return False
+        dec = self.dec[row["id"]]
+        new = dict(row, want=cell, klb_how=how, label_guide="support-v6", status=dec.get("status"),
+                   votes=dict(dec.get("votes") or {}))
+        if cell != row.get("hint"):
+            new["moved_from"] = row.get("hint")
+        if cell in ("c", "d"):
+            new["overlap"] = round(ld.overlap(new["evidence"], new["claim"]), 4)
+        self.got[(row["domain"], cell)].append(new)
+        self.placed.add(row["id"])
+        return True
+
+
+def _ka_tiers(by_q, label):
+    """klue-answered 짝 차례 — (이름, 질문 → 그 차례에 드는가). 세 줄 짝(닻 질문) 먼저, 다음 b · a 짝."""
+    def ok(row):
+        return row is not None and label[row["id"]] == row["hint"]
+
+    def pair(q):
+        return ok(by_q[q].get("b")) and ok(by_q[q].get("a"))
+
+    def trio(q):
+        return bool((by_q[q].get("b") or {}).get("trio")) and pair(q)
+
+    return ok, (("trio", trio), ("pair", pair))
+
+
+def _compose_ka(cands, label, place, seed, stat):
+    by_q = collections.defaultdict(dict)
+    for row in cands:
+        if row["domain"] == "klue-answered":
+            by_q[row["pair"]][row["hint"]] = row
+    qs = sorted(by_q)
+    random.Random(f"{seed}:compose").shuffle(qs)
+    ok, tiers = _ka_tiers(by_q, label)
+    used = set()
+    for how, test in tiers:
+        for q in qs:
+            if q in used or not test(q):
+                continue
+            if not (place.room("klue-answered", "a") and place.room("klue-answered", "b")):
+                continue
+            place.put(by_q[q]["b"], "b", how)
+            place.put(by_q[q]["a"], "a", how)
+            used.add(q)
+    for q in qs:
+        for c in ("b", "a"):
+            row = by_q[q].get(c)
+            if row is not None and row["id"] not in place.placed and ok(row):
+                place.put(row, c, "single")
+    for q in qs:
+        for c in ("b", "a"):
+            row = by_q[q].get(c)
+            if row is None or not label[row["id"]] or ok(row):
+                continue
+            if place.put(row, label[row["id"]], "moved"):
+                stat["ka_moved_in"] += 1
+            else:
+                stat[f"ka_moved_dropped:{label[row['id']]}"] += 1
+
+
+def _compose_mrc(cands, label, place, stat):
+    mrc = sorted((r for r in cands if r["domain"] == "klue-mrc"), key=lambda r: r["id"])
+    by_g = collections.defaultdict(list)
+    for row in mrc:
+        by_g[row["group"]].append(row)
+
+    def no_mate(row):
+        return 0 if any(label[m["id"]] == "d" for m in by_g[row["group"]]) else 1
+
+    bs = sorted((r for r in mrc if label[r["id"]] == "b"), key=no_mate)
+    paired = 0
+    for row in bs:
+        if not place.put(row, "b", "mrc-b"):
+            stat["mrc_b_over"] += 1
+            continue
+        mate = next((m for m in by_g[row["group"]] if label[m["id"]] == "d" and m["id"] not in place.placed), None)
+        if mate is not None and place.put(dict(mate, mate_of=row["id"]), "d", "mrc-d-mate"):
+            paired += 1
+    stat["mrc_b_paired"] = paired
+    for row in mrc:
+        if label[row["id"]] in ("a", "c"):
+            stat[f"mrc_dropped:{label[row['id']]}"] += 1
+
+
+def _stat_key(key):
+    return "|".join(key) if isinstance(key, tuple) else key
+
+
+def compose_klb(cands, decisions, targets=None, seed=KLB_SEED):
+    """판정 끝난 train-g4-klb 후보 → (층 줄, 요약). K5 설계 4-2 · 4-3 · README 36-2.
+    klue-answered : 세 줄 짝 → b · a 짝 → 홀로 → 다른 칸은 자리가 있을 때만.
+    klue-mrc : 같은 묶음에 d 가 있는 b 먼저, b 마다 그 d 하나 짝 (짝 없는 d 는 버림)."""
+    build_t = merge_targets(TARGETS, targets)["klb"]["build"]
+    label = klb_labels(cands, decisions)
+    dec = {k: decisions.get(k) or {} for k in label}
+    stat = collections.Counter()
+    for row in cands:
+        stat[(row["domain"], row["hint"], label[row["id"]] or dec[row["id"]].get("status", "pending"))] += 1
+    place = _KlbPlacer(build_t, dec)
+    _compose_ka(cands, label, place, seed, stat)
+    _compose_mrc(cands, label, place, stat)
+    got = place.got
+    rows = sorted((r for v in got.values() for r in v), key=lambda r: r["id"])
+    by_cell = {f"{d}:{c}": len(got[(d, c)]) for d in build_t for c in CELLS}
+    summary = {"seed": seed, "targets": build_t, "rows": len(rows), "by_cell": by_cell,
+               "short": {f"{d}:{c}": n - len(got[(d, c)]) for d in build_t for c, n in build_t[d].items() if len(got[(d, c)]) < n},
+               "how": dict(sorted(collections.Counter(r["klb_how"] for r in rows).items())),
+               "moved": sum(1 for r in rows if r.get("moved_from")),
+               "judged": {_stat_key(k): v for k, v in sorted(stat.items(), key=str)}}
+    return rows, summary
+
+
 # ---------------------------------------------------------------- 재료 준비 (v6 · v5 · 새 판정)
 
 
@@ -613,10 +932,10 @@ def _guard(g4, old_root, no_old_forbid):
     return make_guard(g4, old_root, no_old_forbid)
 
 
-def _out(a, names):
+def _out(a, names, layer=LAYER):
     """→ (출력 폴더, 출력 경로들, 멈춤 exit 또는 None). git 안 · 이미 있음(--force 없이)은 거부.
     검사만 한다 — 옛 출력 옮기기(--force)는 입력 검사가 다 끝난 뒤 _write 가 한다."""
-    out_dir = os.path.join(os.path.expanduser(a.g4), LAYER)
+    out_dir = os.path.join(os.path.expanduser(a.g4), layer)
     if inside_git(out_dir):
         return out_dir, [], _stop("출력 폴더가 git 안이다 — 쌍 본문을 git 안에 안 쓴다", out=out_dir)
     outs = [os.path.join(out_dir, n) for n in names]
@@ -701,7 +1020,8 @@ def cmd_rate(a):
     return 0
 
 
-def _pick_inputs(a, old_root):
+def _pick_inputs(a, old_root, keys=None):
+    """원천 경로 dict. keys 를 주면 그 열쇠만. --input 의 모르는 열쇠는 Stop(exit 2)."""
     b = os.path.join(old_root, "build")
     paths = {"g3ko": os.path.join(old_root, "sets", "g3", "train-g3-ko.jsonl"),
              "boolq": os.path.join(b, "g3", "boolq", "boolq-labeled-train.jsonl"),
@@ -711,10 +1031,12 @@ def _pick_inputs(a, old_root):
              "mit": os.path.join(b, "g3", "mit", "pairs.jsonl"),
              "mit_rev": os.path.join(b, "g3", "mit", "pairs-f.jsonl"),
              "mit_judged": os.path.join(b, "g3", "mit", "judged.jsonl")}
+    if keys is not None:
+        paths = {k: paths[k] for k in keys}
     for spec in a.input or []:
         key, _, path = spec.partition("=")
         if key not in paths:
-            raise SystemExit(f"모르는 입력 {key} — {sorted(paths)}")
+            raise Stop(f"모르는 입력 {key} — {sorted(paths)}")
         paths[key] = os.path.expanduser(path)
     return paths
 
@@ -730,7 +1052,10 @@ def cmd_pick(a):
     _, outs, code = _out(a, ("pick.jsonl", "pick-summary.json"))
     if code:
         return code
-    paths = _pick_inputs(a, old_root)
+    try:
+        paths = _pick_inputs(a, old_root)
+    except Stop as e:
+        return _stop(str(e))
     taken_paths = _taken_paths(old_root)
     guard, missing = _guard(os.path.expanduser(a.g4), old_root, a.no_old_forbid)
     missing += [p for p in list(paths.values()) + taken_paths if not os.path.exists(p)]
@@ -746,6 +1071,81 @@ def cmd_pick(a):
     return 1 if sum(summary["recheck"].values()) else 0
 
 
+def cmd_pick_klb(a):
+    """K5 train-g4-klb 후보 → <g4>/train-g4-klb/pick-ka.jsonl · pick-mrc.jsonl(평서문 전) · pick-summary.json."""
+    old_root = os.path.expanduser(a.old_root)
+    _, outs, code = _out(a, ("pick-ka.jsonl", "pick-mrc.jsonl", "pick-summary.json"), KLB_LAYER)
+    if code:
+        return code
+    try:
+        paths = _pick_inputs(a, old_root, ("klue_mrc", "klue_rw", "klue_check"))
+    except Stop as e:
+        return _stop(str(e))
+    rw_dir = os.path.dirname(paths["klue_mrc"])
+    done_paths = [os.path.join(rw_dir, f"{n}.jsonl") for n in ("rewrite-train-1", "rewrite-train-2", "rewrite-reserved")]
+    layer_paths = _k_paths(old_root) + [os.path.join(old_root, "sets", "g4", f"{n}.jsonl") for n in ("train-g4-c", "train-g4-bal")]
+    guard, missing = _guard(os.path.expanduser(a.g4), old_root, a.no_old_forbid)
+    missing += [p for p in list(paths.values()) + done_paths + layer_paths if not os.path.exists(p)]
+    if missing:
+        print(json.dumps({"missing": missing}, ensure_ascii=False))
+        return 2
+    src = {k: read_jsonl(p) for k, p in paths.items()}
+    src["klue_done"] = [read_jsonl(p) for p in done_paths]
+    layer_rows = _read_all(layer_paths)
+    ka, mrc, summary = pick_klb(src, guard, layer_rows, _targets(a.targets), a.seed, _keys(layer_rows))
+    summary["inputs"] = {k: os.path.basename(p) for k, p in paths.items()}
+    summary["layers"] = [os.path.basename(p) for p in layer_paths]
+    summary["recheck_ka"] = recheck(ka, guard)
+    if summary["dropped"].get("ka:dup_hint"):
+        print(f"경고 : 같은 질문 · 같은 hint 줄 {summary['dropped']['ka:dup_hint']} — 뒤 줄이 앞 줄을 덮었다", file=sys.stderr)
+    _write(outs, a.force, ka, mrc, summary)
+    print(json.dumps({k: summary[k] for k in ("ka", "mrc", "recheck_ka")}, ensure_ascii=False))
+    return 1 if sum(summary["recheck_ka"].values()) else 0
+
+
+def cmd_build_klb(a):
+    """K5 train-g4-klb 조성 — 판정 후보(pick-ka + 평서문 바꾼 pick-mrc) + decided → <g4>/train-g4-klb/cands.jsonl · summary.json.
+    exit 2 = 파일 없음 · 후보 꼴 · 판정자가 본 쌍(map × batches)과 다름, exit 1 = 고른 줄이 금지 · 학습 층 쌍에 걸림."""
+    g4, old_root = os.path.expanduser(a.g4), os.path.expanduser(a.old_root)
+    _, outs, code = _out(a, ("cands.jsonl", "summary.json"), KLB_LAYER)
+    if code:
+        return code
+    cand_paths = [os.path.expanduser(p) for p in (a.cands or [os.path.join(g4, KLB_LAYER, "pick-ka.jsonl"),
+                                                              os.path.join(g4, "klb", "pick-mrc-rw.jsonl")])]
+    dirs = [os.path.expanduser(d) for d in (a.dirs or [os.path.join(g4, "klb", "judge")])]
+    layer_paths = _k_paths(old_root) + [os.path.join(old_root, "sets", "g4", f"{n}.jsonl") for n in ("train-g4-c", "train-g4-bal")]
+    guard, missing = _guard(g4, old_root, a.no_old_forbid)
+    missing += [p for p in cand_paths + layer_paths if not os.path.exists(p)]
+    missing += [d for d in dirs if not os.path.exists(os.path.join(d, "decided.jsonl"))]
+    if missing:
+        print(json.dumps({"missing": missing}, ensure_ascii=False))
+        return 2
+    cands = _read_all(cand_paths)
+    ids = [r.get("id") for r in cands]
+    domains = merge_targets(TARGETS, _targets(a.targets))["klb"]["build"]
+    need = {"klue-answered": "pair", "klue-mrc": "group"}       # 짝을 묶는 칸
+    bad = [r.get("id") for r in cands if not (r.get("evidence") and r.get("claim") and r.get("hint") in CELLS
+                                              and r.get("domain") in domains and r.get(need.get(r.get("domain"), "id")))]
+    if bad or len(ids) != len(set(ids)):
+        return _stop("후보 꼴이 틀렸다 — 빈 쌍 · 칸 · 목표 밖 원천 · 짝 칸 없음 · id 겹침",
+                     bad=len(bad), dup_ids=len(ids) - len(set(ids)))
+    try:
+        decisions = load_decisions(dirs)
+        check_judged_text(cands, decisions, judged_keys(dirs))
+        rows, summary = compose_klb(cands, decisions, _targets(a.targets), a.seed)
+    except Stop as e:
+        print(f"멈춤 : {e}", file=sys.stderr)
+        return 2
+    taken = _keys(_read_all(layer_paths))
+    summary["inputs"] = [os.path.basename(p) for p in cand_paths]
+    summary["dirs"] = dirs
+    summary["recheck"] = recheck(rows, guard)
+    summary["taken"] = sum(1 for r in rows if sha_key(r) in taken)
+    _write(outs, a.force, rows, summary)
+    print(json.dumps({k: summary[k] for k in ("rows", "by_cell", "short", "how", "recheck", "taken")}, ensure_ascii=False))
+    return 1 if sum(summary["recheck"].values()) or summary["taken"] else 0
+
+
 def _split_pair(spec):
     """「decided.jsonl@pick.jsonl」 → (판정 폴더 또는 decided 파일, 후보 파일). @ 가 없으면 (None, 파일)."""
     if "@" in spec:
@@ -759,6 +1159,13 @@ def _decisions_of(path):
     if os.path.isdir(path):
         return load_decisions([path])
     return {d["id"]: d for d in read_jsonl(path)}
+
+
+def _refuse_klb(rows, name):
+    """train-g4-klb 줄(set · klb_how)이 v6 재료로 들어오면 Stop. klb id 꼬리 -h 는 src_ids 해시라
+    resolve 가 쌍 해시로 잘못 읽는다 (README 36항)."""
+    if any(r.get("set") == KLB_LAYER or "klb_how" in r for r in rows):
+        raise Stop(f"{name} : train-g4-klb 줄은 build --v6 재료가 아니다 — id 꼬리 -h 가 쌍 해시가 아니다")
 
 
 def _stage_inputs(a, old_root, g4):
@@ -780,11 +1187,14 @@ def _stage_inputs(a, old_root, g4):
     for spec in v6:
         dec, cands = _split_pair(spec)
         if dec:
-            got, state = judged_rows(read_jsonl(cands), _decisions_of(dec), draft=True)
+            rows = read_jsonl(cands)
+            _refuse_klb(rows, os.path.basename(cands))
+            got, state = judged_rows(rows, _decisions_of(dec), draft=True)
             count[f"v6:{os.path.basename(cands)}"] = state
             v6_all += got
         else:
             rows = read_jsonl(cands)
+            _refuse_klb(rows, os.path.basename(cands))
             reuse += rows
             v6_all += v6_rows(rows)
     v5_dirs = [os.path.expanduser(d) for d in a.v5_dirs or []]
@@ -845,7 +1255,8 @@ def main(argv=None):
             stream.reconfigure(encoding="utf-8")
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name, func in (("sample-v5", cmd_sample), ("v5-rate", cmd_rate), ("pick-new", cmd_pick), ("build", cmd_build)):
+    for name, func in (("sample-v5", cmd_sample), ("v5-rate", cmd_rate), ("pick-new", cmd_pick), ("build", cmd_build),
+                       ("pick-klb", cmd_pick_klb), ("build-klb", cmd_build_klb)):
         s = sub.add_parser(name)
         s.add_argument("--g4", default="~/.judgemodel/build/g4")
         s.add_argument("--old-root", default="~/.judgemodel")
@@ -855,11 +1266,17 @@ def main(argv=None):
         s.set_defaults(func=func)
     for name in ("sample-v5", "build"):
         sub.choices[name].add_argument("--v5", nargs="*", help="v5 실물 줄 파일. 기본 <old-root>/sets/g1/train-g1-II.jsonl")
-    for name in ("pick-new", "build"):
+    kb = sub.choices["build-klb"]
+    kb.set_defaults(seed=KLB_SEED)
+    kb.add_argument("--cands", nargs="*", default=None,
+                    help="판정 후보 파일. 기본 <g4>/train-g4-klb/pick-ka.jsonl · <g4>/klb/pick-mrc-rw.jsonl (평서문 바꾼 pick-mrc)")
+    kb.add_argument("--dirs", nargs="*", default=None, help="판정 폴더 (decided.jsonl). 기본 <g4>/klb/judge")
+    for name in ("pick-new", "build", "pick-klb", "build-klb"):
         sub.choices[name].add_argument("--no-old-forbid", action="store_true", help="G4Forbid · 옛 평가 문단 검사를 끈다 (시험용)")
     sub.choices["v5-rate"].add_argument("--dirs", nargs="*", default=None,
                                         help="표본 판정 폴더 (decided.jsonl). 기본 <g4>/judge/train-g4-bal-v5")
-    sub.choices["pick-new"].add_argument("--input", nargs="*", help="원천 줄 바꾸기 (열쇠=경로 · g3ko · boolq · klue_mrc · "
+    for name in ("pick-new", "pick-klb"):
+        sub.choices[name].add_argument("--input", nargs="*", help="원천 줄 바꾸기 (열쇠=경로 · g3ko · boolq · klue_mrc · "
                                          "klue_rw · klue_check · mit · mit_rev · mit_judged)")
     bd = sub.choices["build"]
     bd.add_argument("--v6", nargs="*", default=None, help="v6 재료 — 얼린 층 파일 또는 <decided.jsonl 또는 폴더>@<후보 파일>. "

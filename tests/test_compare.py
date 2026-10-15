@@ -3,9 +3,11 @@
 손으로 만든 셋 : 쌍 40 = 묶음 5 × (d 4 · b 2 · a 1 · c 1). 두 조건 × 씨앗 3. 기대값은 각 시험 주석의 손셈.
 """
 import contextlib
+import hashlib
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 
@@ -284,6 +286,29 @@ class VerdictTest(unittest.TestCase):
         md = cmp.to_markdown(result)
         self.assertIn("c 재현", md)
         self.assertIn("a 재현", md)
+
+    def test_by_table_weak_cells_marked_verdict_same(self):
+        # K5 설계 3-4 : 정답 칸 쌍이 weak_min 미만이면 weak 에 적고 표에 「약함」 칸 — 판정은 안 바뀐다
+        _, base = cmp.load_runs(self.fx.runs("B0", base_pred))
+        _, new = cmp.load_runs(self.fx.runs("B1", new_pred))
+        ids = [r["id"] for r in self.fx.set_rows]
+        set_rows = cmp.read_set(self.fx.set_path)
+        hb, hn = cmp.pair_hits(base, ids), cmp.pair_hits(new, ids)
+        rows = cmp.by_table(set_rows, ids, hb, hn, ["domain"])
+        for line in rows:
+            want = {c: line[f"{c}_pairs"] for c in "abcd" if 0 < line[f"{c}_pairs"] < 30}
+            self.assertEqual(line["weak"], want)
+        self.assertTrue(any(line["weak"] for line in rows))
+        self.assertTrue(all(line["weak"] == {} for line in cmp.by_table(set_rows, ids, hb, hn, ["domain"], weak_min=1)))
+        protocol, stats = self.fx.stats(base_pred, new_pred)
+        stats.pop("_tables")
+        result = {"base": "B0", "new": "B1", "protocol_sha256": "0" * 64, "set_sha256": "0" * 64,
+                  "stats": stats, "verdict": cmp.verdict(protocol, stats), "by": rows}
+        md = cmp.to_markdown(result)
+        self.assertIn("| 약함 |", md)
+        self.assertIn(cmp.weak_mark(rows[0]["weak"]), md)
+        self.assertEqual(cmp.weak_mark({"d": 4, "b": 19}), "b 19 · d 4")
+        self.assertEqual(cmp.weak_mark(None), "—")                    # 옛 결과 파일 줄
 
     def test_release_pick_closest_to_mean(self):
         # 새 판 씨앗별 d 재현 0.9 · 0.7 · 0.7 (평균 0.7667) → 가장 가까운 씨앗 2
@@ -583,6 +608,43 @@ class G5AlarmTest(unittest.TestCase):
 
 PROTOCOL_G5_FROZEN = os.path.join(helpers.ROOT, "measure", "protocol-g5.json")
 PROTOCOL_G6 = os.path.join(helpers.ROOT, "measure", "protocol-g6.draft.json")
+PROTOCOL_G6_FROZEN = os.path.join(helpers.ROOT, "measure", "protocol-g6.json")
+PROTOCOL_G7_DRAFT = os.path.join(helpers.ROOT, "measure", "protocol-g7.draft.json")
+
+
+class G7ProtocolTest(unittest.TestCase):
+    """protocol-g7 초안 — g6 에서 바뀌는 칸은 K5 설계 6-3 표뿐 (자는 g6 그대로)."""
+
+    @staticmethod
+    def assemble_g4():
+        build = os.path.join(helpers.ROOT, "build")
+        if build not in sys.path:
+            sys.path.insert(0, build)
+        import assemble_g4
+        return assemble_g4
+
+    def test_draft_same_rulers_as_g6(self):
+        g7, _ = cmp.read_protocol(PROTOCOL_G7_DRAFT)
+        g6, _ = cmp.read_protocol(PROTOCOL_G6_FROZEN)
+        for key in ("sets", "compare_on", "calibrate_on", "release_pick", "bootstrap", "seeds", "majority", "release_gate",
+                    "side", "group_key", "label_guide", "report_only_sets"):
+            self.assertEqual(g7[key], g6[key], key)
+        for key in ("target", "guards", "alarms", "slice_note", "base"):
+            self.assertEqual(g7["pair_gate"][key], g6["pair_gate"][key], key)
+        self.assertEqual((g7["name"], g7["pair_gate"]["new"]), ("protocol-g7", "K5"))
+        self.assertEqual(g7["train_sets"], dict(g6["train_sets"], **{"train-g4-klb": ""}))
+        self.assertEqual(g7["pair_gate"]["report_only"][:len(g6["pair_gate"]["report_only"])], g6["pair_gate"]["report_only"])
+        self.assertIn("K4 → K5", " ".join(g7["pair_gate"]["report_only"]))
+        cc = g7["cell_check"]
+        self.assertEqual(cc["recipe"], g6["cell_check"]["recipe"] + ["train-g4-klb"])
+        self.assertEqual(cc["base_recipe"], ["train-r2", "train-g1-arch", "train-g3-ko"])
+        self.assertEqual((cc["max_shift"], cc["band_edges"], cc["band_min"], cc["weak"]), (0.2, [0.1, 0.2, 0.35], 100, 30))
+        ag = self.assemble_g4()
+        self.assertEqual((cc["max_shift"], cc["band_edges"], cc["band_min"], cc["weak"]),
+                         (ag.MAX_SHIFT, list(ag.BAND_EDGES), ag.BAND_MIN, ag.WEAK_MIN))     # 규약 = 점검표 기본값
+        ack = os.path.join(helpers.ROOT, "measure", cc["ack"]["file"])
+        with open(ack, "rb") as f:
+            self.assertEqual(cc["ack"]["sha256"], hashlib.sha256(f.read()).hexdigest())
 
 
 class G6AlarmTest(unittest.TestCase):

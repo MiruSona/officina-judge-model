@@ -1,0 +1,6 @@
+[
+ {"tool": "T1", "domain": "klue-answered", "cell": "c", "dir": "up", "why": "c@ko 목표 — K2 이래 의도한 오름", "design": "Docs/Design/2026-10-15-v1.2-K5-klue-b보강판설계.md 4-5"},
+ {"tool": "T1", "domain": "kobest-boolq", "cell": "c", "dir": "up", "why": "c@ko 목표 — K2 이래 의도한 오름", "design": "Docs/Design/2026-10-15-v1.2-K5-klue-b보강판설계.md 4-5"},
+ {"tool": "T1", "domain": "kowiki", "cell": "c", "dir": "up", "why": "c@ko 목표 — K2 · K3 의 위키 c 층(train-g4-c) 오름. K4 · K5 는 문턱 안", "design": "Docs/Design/2026-10-15-v1.2-K5-klue-b보강판설계.md 3-5"},
+ {"tool": "T1", "domain": "mit-cs", "cell": "a", "dir": "down", "why": "dev 0 인 c · d 를 원천 닻으로 넣은 몫 (K4 설계 7 ④)", "design": "Docs/Design/2026-10-15-v1.2-K5-klue-b보강판설계.md 4-5"}
+]

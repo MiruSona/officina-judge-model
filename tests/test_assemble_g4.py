@@ -561,5 +561,301 @@ class ProtocolTest(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(tmp, "FROZEN-dev-cmp-g4.sha256")))
 
 
+def rows_of(domain, cells, lang="ko", high=False, tag="r"):
+    """칸별 줄 수 {칸: n} → 가짜 층 줄. high 면 근거가 주장 낱말을 다 가져 겹침 1(구간 3), 아니면 겹침 0(구간 0)."""
+    out = []
+    for cell, n in cells.items():
+        for i in range(n):
+            rid = f"{tag}-{domain}-{lang}-{cell}-{i}"
+            claim = f"주장 {rid}"
+            row = {"id": rid, "evidence": claim if high else "다른 글", "claim": claim, "want": cell, "lang": lang,
+                   "group": f"g:{rid}"}
+            if domain is not None:
+                row["domain"] = domain
+            out.append(row)
+    return out
+
+
+class CellDriftTest(unittest.TestCase):
+    """T1 — 원천 안 칸 몫 이동 (K5 설계 3-2)."""
+
+    def test_ring_vs_base(self):
+        base = rows_of("klue", {"a": 4, "b": 6}, tag="k")
+        recipe = rows_of("klue", {"a": 7, "b": 3})
+        got = ag.cell_drift(recipe, base, [])
+        self.assertEqual([(f["cell"], f["dir"], f["diff"], f["ref_kind"]) for f in got["flags"]],
+                         [("a", "up", 0.3, "K"), ("b", "down", -0.3, "K")])
+        line = next(r for r in got["rows"] if r["cell"] == "b")
+        self.assertEqual((line["n"], line["share"], line["ref"]), (3, 0.3, 0.6))
+
+    def test_quiet_and_edge(self):
+        base = rows_of("klue", {"a": 4, "b": 6}, tag="k")
+        self.assertEqual(ag.cell_drift(rows_of("klue", {"a": 5, "b": 5}), base, [])["flags"], [])   # 차 .10
+        self.assertEqual(ag.cell_drift(rows_of("klue", {"a": 6, "b": 4}), base, [])["flags"], [])   # 차 .20 은 안 울림
+        five = rows_of("klue", {"a": 3, "b": 2}, tag="f")                  # 4/5 − 3/5 = .20000000000000007 도 안 울림
+        self.assertEqual(ag.cell_drift(rows_of("klue", {"a": 4, "b": 1}), five, [])["flags"], [])
+
+    def test_missing_cell_is_zero_share(self):
+        # 기준에 원천이 있는데 칸이 없으면 기준 몫 0 — 새 칸 c 는 +.50
+        got = ag.cell_drift(rows_of("klue", {"b": 5, "c": 5}), rows_of("klue", {"b": 4}, tag="k"), [])
+        self.assertEqual([(f["cell"], f["diff"]) for f in got["flags"]], [("b", -0.5), ("c", 0.5)])
+
+    def test_dev_fallback_and_no_ref(self):
+        dev = rows_of("vitc", {"a": 1, "d": 3}, tag="d")
+        recipe = rows_of("vitc", {"d": 4}) + rows_of("nowhere", {"a": 2})
+        got = ag.cell_drift(recipe, rows_of("klue", {"a": 1}, tag="k"), dev)
+        self.assertEqual([(f["domain"], f["cell"], f["diff"], f["ref_kind"]) for f in got["flags"]],
+                         [("vitc", "a", -0.25, "dev"), ("vitc", "d", 0.25, "dev")])
+        nowhere = [r for r in got["rows"] if r["domain"] == "nowhere"]
+        self.assertTrue(all(r["ref"] is None and r["ref_kind"] is None for r in nowhere))
+
+    def test_prev_diff_report_only(self):
+        base = rows_of("klue", {"a": 4, "b": 6}, tag="k")
+        got = ag.cell_drift(rows_of("klue", {"a": 5, "b": 5}), base, [], prev_rows=rows_of("klue", {"b": 10}, tag="p"))
+        line = next(r for r in got["rows"] if r["cell"] == "b")
+        self.assertEqual((line["prev"], line["prev_diff"]), (1.0, -0.5))
+        self.assertEqual(got["flags"], [])                               # 앞 판 차는 안 울린다
+
+
+class BandDriftTest(unittest.TestCase):
+    """T2 — 언어 × 겹침 구간 칸 몫을 dev 와 견줌 (K5 설계 3-3)."""
+
+    dev = rows_of("klue", {"c": 5, "d": 5}, tag="d")                   # ko 구간 0 · c .5 · d .5
+
+    def test_ring_new_warning(self):
+        got = ag.band_drift(rows_of("klue", {"c": 100}), self.dev, [])
+        self.assertEqual([(f["lang"], f["band"], f["cell"], f["diff"]) for f in got["flags"]],
+                         [("ko", 0, "c", 0.5), ("ko", 0, "d", -0.5)])
+        self.assertEqual(got["baseline"], [])
+
+    def test_floor_quiet(self):
+        self.assertEqual(ag.band_drift(rows_of("klue", {"c": 99}), self.dev, [])["flags"], [])     # 구간 100줄 바닥
+        self.assertEqual(ag.band_drift(rows_of("klue", {"c": 60, "d": 40}), self.dev, [])["flags"], [])
+
+    def test_baseline_report_only(self):
+        recipe = rows_of("klue", {"c": 100})
+        got = ag.band_drift(recipe, self.dev, rows_of("klue", {"c": 120}, tag="k"))
+        self.assertEqual(got["flags"], [])
+        self.assertEqual(len(got["baseline"]), 2)
+        flipped = ag.band_drift(recipe, self.dev, rows_of("klue", {"d": 120}, tag="k"))   # 방향이 다르면 새 경고
+        self.assertEqual(len(flipped["flags"]), 2)
+
+    def test_band_and_lang_split(self):
+        recipe = rows_of("klue", {"c": 100}, high=True) + rows_of("w", {"a": 100}, lang="en")
+        got = ag.band_drift(recipe, self.dev + rows_of("w", {"a": 3}, lang="en", tag="d"), [])
+        self.assertEqual(got["flags"], [])                               # ko 구간 3 은 dev 에 없고 en 구간 0 은 같은 몫
+        self.assertEqual({(r["lang"], r["band"]) for r in got["rows"]}, {("en", 0), ("ko", 3)})
+        gap = next(r for r in got["rows"] if r["lang"] == "ko")
+        self.assertEqual((gap["note"], gap["flag"], gap["dev_band"]), ("dev 없음", False, 0))   # 왜 안 울렸는지 남긴다
+
+
+class WeakCellsTest(unittest.TestCase):
+    """T3 — dev 30쌍 미만 칸 「판정 약함」 (K5 설계 3-4)."""
+
+    def test_weak_edge_and_guard_share(self):
+        dev = rows_of("klue", {"b": 29, "c": 40}) + rows_of("wiki", {"b": 30, "d": 1}) + rows_of("vit", {"b": 20}, lang="en")
+        got = ag.weak_cells(dev, [("b", "ko"), ("b", "en")])
+        self.assertEqual(got["cells"], [{"domain": "klue", "cell": "b", "dev": 29}, {"domain": "vit", "cell": "b", "dev": 20},
+                                        {"domain": "wiki", "cell": "d", "dev": 1}])
+        ko, en = got["guards"]
+        self.assertEqual((ko["guard"], ko["pairs"], ko["weak_pairs"], ko["weak_share"], ko["pp_per_pair"]),
+                         ("b@ko", 59, 29, round(29 / 59, 4), round(100 / 59, 3)))
+        self.assertEqual((en["pairs"], en["weak_pairs"]), (20, 20))
+
+    def test_protocol_guards_read(self):
+        self.assertEqual(ag.protocol_guards(os.path.join(helpers.ROOT, "measure", "protocol-g6.json")),
+                         [("b", "en"), ("b", "ko")])
+
+
+class CellCheckCliTest(unittest.TestCase):
+    """cells · check --base-recipe — exit 0 · 1(미허용 T1 · 새 T2) · 2(파일 없음 · 금지 칸 허용) · --draft 는 0."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self.base = self.write("base.jsonl", rows_of("klue", {"a": 4, "b": 6}, tag="k"))
+        self.dev = self.write("dev.jsonl", rows_of("klue", {"a": 4, "b": 6}, tag="d"))
+        self.down = self.write("down.jsonl", rows_of("klue", {"a": 7, "b": 3}))       # b −.30 · a +.30
+        self.ack = os.path.join(self.tmp, "ack.json")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def write(self, name, rows):
+        path = os.path.join(self.tmp, name)
+        ag.write_jsonl(path, rows)
+        return path
+
+    def write_ack(self, entries):
+        with open(self.ack, "w", encoding="utf-8") as f:
+            json.dump(entries, f, ensure_ascii=False)
+
+    def cells(self, recipe, *extra):
+        out, err = Out(), Out()
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+            code = ag.main(["cells", "--recipe", recipe, "--dev", self.dev, "--base-recipe", self.base] + list(extra))
+        self.out, self.err = out.getvalue(), err.getvalue()
+        return code
+
+    def test_quiet_exit0_table_out(self):
+        self.assertEqual(self.cells(self.base), 0)
+        self.assertIn("## T1 원천 안 칸 몫 이동", self.out)
+        self.assertIn("## T3 작은 지킴 칸", self.out)
+        self.assertNotIn("경고 T1", self.err)
+
+    def test_ring_exit1_draft_exit0_json(self):
+        self.assertEqual(self.cells(self.down), 1)
+        self.assertIn("경고 T1 : klue b -0.300", self.err)
+        self.assertEqual(self.cells(self.down, "--draft", "--json"), 0)
+        doc = json.loads(self.out)
+        self.assertEqual([(f["cell"], f["dir"]) for f in doc["drift"]["unacked"]], [("a", "up"), ("b", "down")])
+        self.assertEqual(set(doc), {"cells", "cell_check", "drift", "bands", "weak"})
+        self.assertEqual(doc["cell_check"]["base_recipe"], ["base.jsonl"])
+        self.assertNotIn("주장", self.out)                                # 쌍 본문은 안 찍는다
+
+    def test_ack_allows_but_b_down_still_blocks(self):
+        self.write_ack([{"tool": "T1", "domain": "klue", "cell": "a", "dir": "up", "why": "시험"}])
+        self.assertEqual(self.cells(self.down, "--ack", self.ack, "--json"), 1)          # b 내림은 남는다
+        doc = json.loads(self.out)
+        self.assertEqual([f["cell"] for f in doc["drift"]["acked"]], ["a"])
+        self.assertEqual([f["cell"] for f in doc["drift"]["unacked"]], ["b"])
+        self.assertEqual(doc["cell_check"]["ack"]["sha256"], ag.sha256_file(self.ack))
+        up = self.write("up.jsonl", rows_of("klue", {"a": 1, "b": 9}))                 # b +.30 · a −.30
+        self.write_ack([{"tool": "T1", "domain": "klue", "cell": "a", "dir": "down", "why": "시험"},
+                        {"tool": "T1", "domain": "klue", "cell": "b", "dir": "up", "why": "시험"}])
+        self.assertEqual(self.cells(up, "--ack", self.ack), 0)
+        self.assertIn("허용 T1 : klue b +0.300", self.err)
+        self.write_ack([{"tool": "T1", "domain": "klue", "cell": "a", "dir": "up", "why": "시험"}])
+        self.assertEqual(self.cells(up, "--ack", self.ack), 1)                         # 방향이 다르면 허용 아님
+
+    def test_forbidden_ack_exit2_even_draft(self):
+        self.write_ack([{"tool": "T1", "domain": "klue", "cell": "b", "dir": "down", "why": "시험"}])
+        self.assertEqual(self.cells(self.down, "--ack", self.ack, "--draft"), 2)
+        self.assertIn("b 칸 내림은 허용할 수 없다", self.err)
+
+    def test_bad_ack_and_missing_files_exit2(self):
+        for entries in ([{"tool": "T1", "domain": "klue", "cell": "a", "dir": "up"}],                  # why 없음
+                        [{"tool": "T1", "domain": "klue", "cell": "a", "dir": "up", "why": "x", "evil": 1}],
+                        [{"tool": "T9", "cell": "a", "dir": "up", "why": "x"}],
+                        [{"tool": "T1", "domain": "klue", "cell": "a", "dir": "sideways", "why": "x"}],
+                        [{"tool": "T1", "domain": "klue", "cell": "B", "dir": "down", "why": "x"}],   # 큰 글자로 금지 비켜 가기
+                        [{"tool": "T1", "domain": "klue", "cell": "contradict", "dir": "up", "why": "x"}],
+                        [{"tool": ["T1"], "domain": "klue", "cell": "a", "dir": "up", "why": "x"}],
+                        [{"tool": "T2", "lang": "jp", "band": 0, "cell": "a", "dir": "up", "why": "x"}],
+                        [{"tool": "T2", "lang": "ko", "band": "0", "cell": "a", "dir": "up", "why": "x"}],
+                        [{"tool": "T2", "lang": "ko", "band": 7, "cell": "a", "dir": "up", "why": "x"}],
+                        {"tool": "T1"}):
+            self.write_ack(entries)
+            self.assertEqual(self.cells(self.down, "--ack", self.ack, "--draft"), 2, entries)
+        self.assertEqual(self.cells(self.down, "--ack", os.path.join(self.tmp, "없음.json"), "--draft"), 2)
+        with open(self.ack, "w", encoding="utf-8") as f:
+            f.write("[{깨진")
+        self.assertEqual(self.cells(self.down, "--ack", self.ack, "--draft"), 2)            # 깨진 JSON 도 exit 2
+        self.assertEqual(self.cells(self.down, "--protocol", os.path.join(self.tmp, "없음.json"), "--draft"), 2)
+        self.assertEqual(self.cells(self.down, "--prev-recipe", os.path.join(self.tmp, "없음.jsonl"), "--draft"), 2)
+        out = Out()
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr"):
+            self.assertEqual(ag.main(["cells", "--recipe", self.down, "--dev", self.dev, "--base-recipe",
+                                      os.path.join(self.tmp, "없음.jsonl")]), 2)
+
+    def test_t2_new_warning_exit1_baseline_exit0_ack(self):
+        dev = self.write("dev2.jsonl", rows_of("klue", {"c": 5, "d": 5}, tag="d"))
+        self.dev = dev
+        # d 한 줄은 구간 3(dev 에 없는 구간)에 둬 빈칸(zero)만 막는다
+        recipe = self.write("c100.jsonl", rows_of("klue", {"c": 100}) + rows_of("klue", {"d": 1}, high=True, tag="h"))
+        self.base = self.write("base2.jsonl", rows_of("klue", {"c": 5, "d": 5}, tag="k"))
+        self.assertEqual(self.cells(recipe, "--draft"), 0)
+        self.assertEqual(self.cells(recipe), 1)
+        self.assertIn("경고 T2 : ko 구간 0 c +0.500", self.err)
+        self.write_ack([{"tool": "T2", "lang": "ko", "band": 0, "cell": "c", "dir": "up", "why": "시험"},
+                        {"tool": "T2", "lang": "ko", "band": 0, "cell": "d", "dir": "down", "why": "시험"},
+                        {"tool": "T1", "domain": "klue", "cell": "c", "dir": "up", "why": "시험"},
+                        {"tool": "T1", "domain": "klue", "cell": "d", "dir": "down", "why": "시험"}])
+        self.assertEqual(self.cells(recipe, "--ack", self.ack), 0)
+        self.base = self.write("base3.jsonl", rows_of("klue", {"c": 100}, tag="k"))   # 기준에서도 울림 → 기준선부터
+        self.assertEqual(self.cells(recipe), 0)
+        self.assertIn("기준선부터 T2 : ko 구간 0 c +0.500", self.err)
+
+    def test_check_args_without_base_exit2(self):
+        out = Out()
+        for extra in (["--ack", self.ack], ["--json"], ["--prev-recipe", self.base]):
+            with mock.patch("sys.stdout", out), mock.patch("sys.stderr"):
+                self.assertEqual(ag.main(["cells", "--recipe", self.base, "--dev", self.dev] + extra), 2, extra)
+
+    def test_prev_recipe_big_shift_shown_in_table(self):
+        prev = self.write("prev.jsonl", rows_of("klue", {"b": 10}, tag="p"))
+        self.assertEqual(self.cells(self.base, "--prev-recipe", prev), 0)                  # 앞 판 차는 안 막는다
+        self.assertIn("| klue | b | 0.600 | K | 0.600 | +0.000 | -0.400 | 앞 판 차 큼 (보고) |", self.out)
+        self.assertEqual(self.cells(self.base, "--prev-recipe", prev, "--json"), 0)
+        doc = json.loads(self.out)
+        self.assertEqual(doc["cell_check"]["prev_recipe"], ["prev.jsonl"])
+        self.assertEqual(doc["cell_check"]["guards"], ["b@ko", "b@en"])
+
+    def test_weak_never_blocks(self):
+        self.assertEqual(self.cells(self.base), 0)                        # dev 칸이 다 30 미만 — 표시만
+        self.assertIn("약함 T3 : b@ko 6쌍 중 6", self.err)
+
+    def test_protocol_not_dict_exit2(self):
+        for doc in ([1, 2], {"pair_gate": [1]}, {"pair_gate": {"guards": "b"}}, {"pair_gate": {"guards": [3]}}):
+            path = os.path.join(self.tmp, "proto.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(doc, f)
+            self.assertEqual(self.cells(self.base, "--protocol", path, "--draft"), 2, doc)
+            self.assertIn("규약 꼴이 틀렸다", self.err)
+
+    def test_no_ref_domain_warned(self):
+        recipe = self.write("nowhere.jsonl", rows_of("klue", {"a": 4, "b": 6}) + rows_of("nowhere", {"a": 2}, tag="n"))
+        self.assertEqual(self.cells(recipe, "--draft"), 0)
+        self.assertIn("기준 없음 T1 : nowhere", self.err)
+        self.assertNotIn("기준 없음 T1 : klue", self.err)
+
+    def test_unused_ack_reported_not_blocking(self):
+        self.write_ack([{"tool": "T1", "domain": "klue", "cell": "a", "dir": "up", "why": "시험"},
+                        {"tool": "T1", "domain": "wiki", "cell": "c", "dir": "up", "why": "낡은 허용"},
+                        {"tool": "T2", "lang": "en", "band": 1, "cell": "d", "dir": "down", "why": "낡은 허용"}])
+        self.assertEqual(self.cells(self.down, "--ack", self.ack, "--json"), 1)         # 막는 건 b 내림뿐
+        doc = json.loads(self.out)
+        self.assertEqual(doc["cell_check"]["unused_ack"],
+                         [{"tool": "T1", "domain": "wiki", "cell": "c", "dir": "up"},
+                          {"tool": "T2", "lang": "en", "band": 1, "cell": "d", "dir": "down"}])
+        self.assertIn("안 쓴 허용 : T1 wiki c up", self.err)
+        self.assertEqual(self.cells(self.base, "--ack", self.ack), 0)                  # 안 쓴 허용은 안 막는다
+        self.assertIn("| T1 | klue a up |", self.out)                                  # 표에도 적는다
+
+    def test_dropped_lang_counted(self):
+        recipe = self.write("mix.jsonl", rows_of("klue", {"a": 4, "b": 6}) + rows_of("mixed", {"a": 3}, lang="mix", tag="m"))
+        self.assertEqual(self.cells(recipe, "--draft", "--json"), 0)
+        self.assertEqual(json.loads(self.out)["bands"]["dropped_lang"], {"train": 3, "dev": 0})
+
+    def test_thresholds_must_be_positive(self):
+        for extra in (["--max-shift", "0"], ["--max-shift", "-0.1"], ["--band-min", "0"], ["--weak-min", "-1"]):
+            self.assertEqual(self.cells(self.base, "--draft", *extra), 2, extra)
+            self.assertIn("양수여야 한다", self.err)
+
+
+class CheckBaseRecipeTest(CheckTest):
+    """check --recipe --base-recipe — 점검표가 겹침 · 빈칸 검사와 같이 돈다."""
+
+    check_out = CheckRecipeTest.check_out
+
+    def test_check_runs_t1_t3_and_blocks(self):
+        base = os.path.join(self.tmp, "k.jsonl")
+        ag.write_jsonl(base, rows_of("kowiki", {"c": 6, "a": 4}, tag="k"))
+        recipe = os.path.join(self.tmp, "new.jsonl")
+        ag.write_jsonl(recipe, rows_of("kowiki", {"c": 3, "a": 7}))
+        code, out = self.check_out("--recipe", recipe, "--base-recipe", base, "--json")
+        self.assertEqual(code, 1)
+        doc = json.loads(out)
+        self.assertEqual([f["cell"] for f in doc["drift"]["unacked"]], ["a", "c"])
+        self.assertEqual(doc["cell_check"]["max_shift"], 0.2)
+        self.assertEqual(self.check_out("--recipe", recipe, "--base-recipe", base, "--draft")[0], 0)
+        self.assertEqual(self.check_out("--recipe", base, "--base-recipe", base)[0], 0)
+        self.assertEqual(self.check_out("--base-recipe", base)[0], 2)                  # --recipe 없이 못 준다
+        code, out = self.check_out("--recipe", base, "--base-recipe", base)
+        self.assertIn("## T1 원천 안 칸 몫 이동", out)                                   # check 도 기본은 표
+        self.assertIn("- 겹침 0 · scrub 0 · min_groups 모자람 0", out)
+        self.assertEqual(self.check_out("--recipe", base, "--ack", base)[0], 2)          # --base-recipe 없이 --ack
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -345,19 +345,253 @@ class PickTest(unittest.TestCase):
         self.assertEqual(summary["dropped"]["made:eval_text"], 1)
 
 
+class KlbPickTest(unittest.TestCase):
+    """K5 train-g4-klb 후보 (K5 설계 4-3)."""
+
+    def ka(self, q, group):
+        out = []
+        for cell, form in (("b", "qa-alt"), ("a", "qa-true")):
+            r = row(f"{q}-{cell}", "klue-answered", cell, group=group, form=form, split="train", pair=q, src_ids=[q],
+                    claim_rewrite=f"평서문 {q} {cell} 이다.", want="")
+            r["claim"] = f"질문 {q} 인가?"
+            r["evidence"] = f"근거 {q} 하나뿐인 문장이다."
+            out.append(r)
+        return out
+
+    def mrc(self, rid, group):
+        return dict(row(rid, "klue-mrc", "d", group=group, form="unanswerable", split="train", src_ids=[f"g-{rid}"],
+                        want="", question=f"물음 {rid} 인가?"), claim="", evidence=f"{rid * 8} 은 서로 다른 글이다.")
+
+    def src(self):
+        rw = []
+        for i in range(8):
+            rw += self.ka(f"Q{i}", f"klue:D{i // 2}")      # 묶음 하나에 질문 둘
+        mrc = [self.mrc(f"u{i}", f"klue:M{i // 3}") for i in range(9)] + [self.mrc("solo", "klue:S")]
+        return {"klue_rw": rw, "klue_mrc": mrc, "klue_check": [{"pair": "Q7", "pass": False}],
+                "klue_done": [[{"group": "klue:M0", "src_ids": ["g-u0"]}]]}
+
+    def layer(self):
+        anchor = row("bal-d", "klue-answered", "d", group="klue:D3", form=lb.KLUE_ANS, src_ids=["Q6"])
+        used = row("k-b", "klue-answered", "b", group="klue:D0", form="qa-alt", src_ids=["Q0"], pair="Q0")
+        return [anchor, used]
+
+    def test_ka_order_targets_and_exclusions(self):
+        targets = {"klb": {"ka": {"b": 4, "a": 2}, "mrc": 0}}
+        ka, _, summary = lb.pick_klb(self.src(), NoGuard(), self.layer(), targets, 9)
+        qs = [r["pair"] for r in ka]
+        self.assertNotIn("Q0", qs)          # 층에 쓴 질문
+        self.assertNotIn("Q7", qs)          # 평서문 검사 떨어짐
+        self.assertEqual(collections.Counter(r["hint"] for r in ka), {"b": 4, "a": 2})
+        trio = [r for r in ka if r["trio"]]
+        self.assertEqual({(r["pair"], r["anchor"]) for r in trio}, {("Q6", "bal-d")})   # 닻 질문 먼저 · b · a 둘 다
+        self.assertEqual(len(trio), 2)
+        self.assertTrue(all(r["claim"].startswith("평서문") and r["want"] == "" and r["id"].startswith("klb-ka-") for r in ka))
+        self.assertEqual(summary["ka"]["anchor_questions"], 1)
+        per_group = collections.Counter(r["group"] for r in ka if r["hint"] == "b")
+        self.assertLessEqual(max(per_group.values()), 2)
+
+    def test_mrc_same_group_rewritten_and_layer_para_dropped(self):
+        layer = self.layer() + [dict(row("bal-m", "klue-mrc", "d", group="klue:M2"), evidence="u8" * 8 + " 은 서로 다른 글이다.")]
+        targets = {"klb": {"ka": {"b": 0, "a": 0}, "mrc": 10}}
+        _, mrc, summary = lb.pick_klb(self.src(), NoGuard(), layer, targets, 9)
+        groups = collections.Counter(r["group"] for r in mrc)
+        self.assertNotIn("klue:S", groups)                       # 질문 하나뿐인 묶음
+        self.assertNotIn("g-u0", {s for r in mrc for s in r["src_ids"]})    # g1 이 이미 바꾼 줄
+        self.assertNotIn("g-u8", {s for r in mrc for s in r["src_ids"]})    # 층 문단과 겹침
+        self.assertEqual(dict(groups), {"klue:M0": 2, "klue:M1": 3, "klue:M2": 2})   # 둘째 판에 셋째 질문까지 채움
+        self.assertTrue(all(r["needs_rewrite"] and r["claim"] == "" and r["id"].startswith("klb-mrc-u-") for r in mrc))
+        self.assertEqual(summary["dropped"]["mrc:layer_para"], 1)
+        again = lb.pick_klb(self.src(), NoGuard(), layer, targets, 9)[1]
+        self.assertEqual(json.dumps(mrc, ensure_ascii=False), json.dumps(again, ensure_ascii=False))
+
+    def test_dup_hint_counted_and_unknown_input_exit2(self):
+        src = self.src()
+        src["klue_rw"].append(dict(src["klue_rw"][0]))                  # Q0 b 가 두 줄
+        _, _, summary = lb.pick_klb(src, NoGuard(), [], {"klb": {"ka": {"b": 1, "a": 1}, "mrc": 0}}, 9)
+        self.assertEqual(summary["dropped"]["ka:dup_hint"], 1)
+        for cmd, key in (("pick-klb", "mit"), ("pick-klb", "bogus"), ("pick-new", "bogus")):
+            with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout"):
+                code = lb.main([cmd, "--g4", os.path.join(tmp, "g4"), "--old-root", tmp, "--input", f"{key}=x.jsonl"])
+            self.assertEqual(code, 2, (cmd, key))                        # pick-klb 는 klue 셋 열쇠만 안다
+
+    def test_guard_drops_whole_question(self):
+        src = self.src()
+        src["klue_rw"][3]["claim_rewrite"] = "금지 평서문 이다."      # Q1 의 a 줄
+        ka, _, summary = lb.pick_klb(src, WordGuard(), [], {"klb": {"ka": {"b": 10, "a": 10}, "mrc": 0}}, 9)
+        self.assertNotIn("Q1", {r["pair"] for r in ka})
+        self.assertEqual(summary["dropped"]["ka:eval_text"], 1)
+
+
+def ka_rows(q, trio=False):
+    """klue-answered 한 질문의 b · a 후보 둘."""
+    return [row(f"{q}-{c}", "klue-answered", c, group=f"klue:{q}", pair=q, trio=trio) for c in ("b", "a")]
+
+
+class KlbComposeTest(unittest.TestCase):
+    """K5 train-g4-klb 조성 (K5 설계 4-2 · 4-3) — 세 줄 짝 먼저 · 같은 묶음 b · d 짝 · 다른 칸은 자리가 있을 때만."""
+
+    def ka(self, q, trio=False):
+        return ka_rows(q, trio)
+
+    def cands(self):
+        rows = self.ka("T0", trio=True) + self.ka("P0") + self.ka("P1") + self.ka("S0")
+        rows += [row(f"m{i}", "klue-mrc", "d", group=f"klue:M{i // 2}") for i in range(6)]
+        return rows
+
+    def decisions(self, cands, change=None):
+        out = {r["id"]: {"id": r["id"], "label": r["hint"], "status": "agree", "votes": {"j1": r["hint"], "j2": r["hint"]}}
+               for r in cands}
+        for rid, label in (change or {}).items():
+            out[rid] = dict(out[rid], label=label) if label != "drop" else dict(out[rid], label="", status="drop")
+        return out
+
+    def test_trio_first_then_pairs_and_mrc_mates(self):
+        cands = self.cands()
+        change = {"S0-a": "d", "m0": "b", "m2": "b", "m4": "b", "m5": "a", "P1-b": "drop"}
+        targets = {"klb": {"build": {"klue-answered": {"a": 2, "b": 2}, "klue-mrc": {"b": 2, "d": 3}}}}
+        rows, summary = lb.compose_klb(cands, self.decisions(cands, change), targets, seed=7)
+        got = {r["id"]: r for r in rows}
+        self.assertEqual(got["T0-b"]["klb_how"], "trio")                 # 닻 질문이 늘 먼저
+        self.assertEqual({r["pair"] for r in rows if r["domain"] == "klue-answered"}, {"T0", "P0"})
+        self.assertNotIn("S0-a", got)                                    # d 로 정함 · 목표 0 칸 → 버림
+        self.assertEqual(summary["judged"]["ka_moved_dropped:d"], 1)
+        # klue-mrc : 짝 d 가 있는 b(m0 · m2) 먼저 b 2 를 채우고, 짝 없는 b(m4)는 넘침 · m5(a)는 버림
+        self.assertEqual({r["id"] for r in rows if r["want"] == "b" and r["domain"] == "klue-mrc"}, {"m0", "m2"})
+        self.assertEqual({r["id"]: r["mate_of"] for r in rows if r["domain"] == "klue-mrc" and r["want"] == "d"},
+                         {"m1": "m0", "m3": "m2"})
+        self.assertEqual(summary["judged"]["mrc_b_over"], 1)
+        self.assertEqual(summary["judged"]["mrc_dropped:a"], 1)
+        self.assertEqual(summary["short"], {"klue-mrc:d": 1})
+        self.assertEqual(got["m0"]["moved_from"], "d")                   # hint d → b
+        self.assertNotIn("moved_from", got["m1"])
+        self.assertTrue(all(r["label_guide"] == "support-v6" and r["status"] == "agree" for r in rows))
+        self.assertIn("overlap", got["m1"])
+        self.assertNotIn("overlap", got["m0"])
+        again = lb.compose_klb(cands, self.decisions(cands, change), targets, seed=7)[0]
+        self.assertEqual(json.dumps(rows, ensure_ascii=False), json.dumps(again, ensure_ascii=False))
+
+    def test_priority_beats_id_order(self):
+        """쓸 짝이 목표보다 많고 닻 질문 · 짝 있는 b 가 id 뒤쪽 — 차례가 없으면 씨앗 따라 떨어진다."""
+        ka = self.ka("Z9", trio=True) + self.ka("Y7") + self.ka("Y8")
+        ka += [r for q in ("A0", "A1", "A2") for r in self.ka(q)]
+        mrc = [row(f"a{i}", "klue-mrc", "d", group="klue:MA") for i in range(3)]   # b 셋 · d 없음
+        mrc += [row("z0", "klue-mrc", "d", group="klue:MZ"), row("z1", "klue-mrc", "d", group="klue:MZ")]
+        cands = ka + mrc
+        change = {f"{q}-a": "drop" for q in ("A0", "A1", "A2")}
+        change.update({"a0": "b", "a1": "b", "a2": "b", "z0": "b"})
+        targets = {"klb": {"build": {"klue-answered": {"a": 2, "b": 2}, "klue-mrc": {"b": 1, "d": 1}}}}
+        for seed in range(20):
+            rows, _ = lb.compose_klb(cands, self.decisions(cands, change), targets, seed=seed)
+            got = {r["id"]: r["klb_how"] for r in rows}
+            self.assertEqual((got.get("Z9-b"), got.get("Z9-a")), ("trio", "trio"), seed)    # 닻 질문은 늘 든다
+            self.assertEqual(sum(1 for k, how in got.items() if how == "pair"), 2, seed)    # 남은 자리는 짝 (홀로 아님)
+            self.assertFalse(any(k.startswith("A") for k in got), seed)
+            self.assertEqual({k for k in got if k[0] in "az"}, {"z0", "z1"}, seed)        # 짝 d 가 있는 b 먼저
+
+    def test_cli_refuses_bad_cands_and_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g4 = os.path.join(tmp, "g4")
+            with mock.patch("sys.stdout"):
+                self.assertEqual(lb.main(["build-klb", "--g4", g4, "--old-root", tmp, "--no-old-forbid"]), 2)
+            self.assertFalse(os.path.exists(os.path.join(g4, lb.KLB_LAYER, "cands.jsonl")))
+
+
+class KlbCliTest(unittest.TestCase):
+    """build-klb 명령 — 판정자가 본 글(map × batches) 대조 · 후보 꼴 거부는 exit 2, 출력 없음."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        for rel in ("sets/2026-10-10/build/train-r2.jsonl", "sets/g1/train-g1-arch.jsonl", "sets/g3/train-g3-ko.jsonl",
+                    "sets/g4/train-g4-c.jsonl", "sets/g4/train-g4-bal.jsonl"):
+            self.put(rel, [])
+        self.cands = ka_rows("T0", trio=True) + ka_rows("P0")
+        self.cands += [row(f"m{i}", "klue-mrc", "d", group="klue:M0") for i in range(2)]
+        self.targets = os.path.join(self.tmp, "targets.json")
+        lb.write_json(self.targets, {"klb": {"build": {"klue-answered": {"a": 2, "b": 2}, "klue-mrc": {"b": 1, "d": 1}}}})
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def put(self, rel, rows):
+        path = os.path.join(self.tmp, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        lb.write_jsonl(path, rows)
+        return path
+
+    def judge(self, cands, seen=None):
+        """판정 폴더 — decided · map(q → id) · batches(q → 판정자가 본 글). seen 은 글을 바꿔 보일 {id: 주장}."""
+        seen = seen or {}
+        self.put("judge/decided.jsonl", [{"q": f"q{i}", "id": r["id"], "label": r["hint"], "status": "agree",
+                                          "votes": {"j1": r["hint"], "j2": r["hint"]}} for i, r in enumerate(cands)])
+        self.put("judge/map/map.jsonl", [{"q": f"q{i}", "batch": "b01", "id": r["id"], "trap": False}
+                                         for i, r in enumerate(cands)] + [{"q": "t1", "batch": "b01", "id": "trap-1", "trap": True}])
+        items = [{"q": f"q{i}", "evidence": r["evidence"], "claim": seen.get(r["id"], r["claim"])} for i, r in enumerate(cands)]
+        for j in (1, 2):
+            self.put(f"judge/batches/b01-j{j}.jsonl", items + [{"q": "t1", "evidence": "함정", "claim": "함정 주장"}])
+
+    def run_klb(self, cands):
+        path = self.put("in/cands.jsonl", cands)
+        argv = ["build-klb", "--g4", os.path.join(self.tmp, "g4"), "--old-root", self.tmp, "--targets", self.targets,
+                "--cands", path, "--dirs", os.path.join(self.tmp, "judge")]
+        with mock.patch.object(lb, "_guard", lambda *args: (NoGuard(), [])), mock.patch("sys.stdout"), \
+                mock.patch("sys.stderr"):
+            return lb.main(argv)
+
+    def out_exists(self):
+        return os.path.exists(os.path.join(self.tmp, "g4", lb.KLB_LAYER, "cands.jsonl"))
+
+    def test_good_run_writes(self):
+        self.judge(self.cands)
+        self.assertEqual(self.run_klb(self.cands), 0)
+        self.assertTrue(self.out_exists())
+
+    def test_pair_sha_mismatch_stops(self):
+        self.judge(self.cands, seen={"m0": "판정자가 본 다른 주장 이다."})
+        self.assertEqual(self.run_klb(self.cands), 2)
+        self.assertFalse(self.out_exists())
+
+    def test_batches_disagree_or_map_missing_stops(self):
+        self.judge(self.cands)
+        self.put("judge/batches/b01-j2.jsonl", [{"q": "q0", "evidence": "다른 근거", "claim": "다른 주장"}])
+        self.assertEqual(self.run_klb(self.cands), 2)
+        self.judge(self.cands)
+        os.remove(os.path.join(self.tmp, "judge", "map", "map.jsonl"))
+        self.assertEqual(self.run_klb(self.cands), 2)
+        self.judge(self.cands[:-1])                       # 판정은 있는데 판정자가 본 글이 없다
+        self.put("judge/decided.jsonl", lb.read_jsonl(os.path.join(self.tmp, "judge", "decided.jsonl"))
+                 + [{"q": "qx", "id": self.cands[-1]["id"], "label": "d", "status": "agree"}])
+        self.assertEqual(self.run_klb(self.cands), 2)
+        self.assertFalse(self.out_exists())
+
+    def test_bad_cand_shapes_stop(self):
+        self.judge(self.cands)
+        bad = {"empty_claim": [dict(self.cands[0], claim="")] + self.cands[1:],
+               "dup_id": self.cands + [dict(self.cands[0])],
+               "outside_domain": self.cands + [row("w0", "kowiki", "c")],
+               "no_pair": [{k: v for k, v in self.cands[0].items() if k != "pair"}] + self.cands[1:],
+               "no_group": self.cands[:-1] + [{k: v for k, v in self.cands[-1].items() if k != "group"}]}
+        for name, cands in bad.items():
+            self.assertEqual(self.run_klb(cands), 2, name)
+            self.assertFalse(self.out_exists(), name)
+
+
 class CliTest(unittest.TestCase):
     def test_refuses_output_inside_git(self):
-        for cmd in ("sample-v5", "pick-new", "build"):
+        for cmd in ("sample-v5", "pick-new", "build", "pick-klb", "build-klb"):
             with tempfile.TemporaryDirectory() as tmp:
                 with mock.patch.object(lb, "inside_git", lambda path: True), mock.patch("sys.stdout"):
                     code = lb.main([cmd, "--g4", os.path.join(tmp, "g4"), "--old-root", tmp])
                 self.assertEqual(code, 2, cmd)
                 self.assertFalse(os.path.exists(os.path.join(tmp, "g4", lb.LAYER)))
+                self.assertFalse(os.path.exists(os.path.join(tmp, "g4", lb.KLB_LAYER)))
 
     def test_refuses_overwrite(self):
-        for cmd, name in (("sample-v5", "sample-v5.jsonl"), ("pick-new", "pick.jsonl"), ("build", "cands.jsonl")):
+        for cmd, name, layer in (("sample-v5", "sample-v5.jsonl", lb.LAYER), ("pick-new", "pick.jsonl", lb.LAYER),
+                                 ("build", "cands.jsonl", lb.LAYER), ("pick-klb", "pick-ka.jsonl", lb.KLB_LAYER),
+                                 ("build-klb", "cands.jsonl", lb.KLB_LAYER)):
             with tempfile.TemporaryDirectory() as tmp:
-                out = os.path.join(tmp, "g4", lb.LAYER)
+                out = os.path.join(tmp, "g4", layer)
                 os.makedirs(out)
                 with open(os.path.join(out, name), "w", encoding="utf-8") as f:
                     f.write("old\n")
@@ -420,6 +654,18 @@ class CliTest(unittest.TestCase):
         self.assertFalse(any(r["domain"] == "proposals" for r in rows))              # 넘은 칸의 v5 줄은 안 든다
         self.assertEqual(summary["inputs"]["v5_block"], ["proposals:c"])
         self.assertEqual(summary["inputs"]["v5"]["blocked"], 8)
+
+    def test_build_refuses_klb_rows_as_v6(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = self.end_to_end_root(tmp, over=[])
+            klb = os.path.join(tmp, "klb.jsonl")
+            lb.write_jsonl(klb, [dict(row("klb-ka-b-0001-h00000000", "klue-answered", "b"), set=lb.KLB_LAYER, klb_how="pair")])
+            pick = os.path.join(tmp, "klb-pick.jsonl")
+            lb.write_jsonl(pick, [dict(row("klb-ka-b-0002-h00000000", "klue-answered", "b"), set=lb.KLB_LAYER, want="")])
+            for v6 in ([klb], [f"{os.path.join(tmp, 'g4', 'judge', 'train-g4-bal')}@{pick}"]):
+                with mock.patch("sys.stderr"):
+                    self.assertEqual(self.run_build(argv + ["--v6"] + v6), 2, v6)
+                self.assertFalse(os.path.exists(os.path.join(tmp, "g4", lb.LAYER, "cands.jsonl")))
 
     def test_build_stops_without_v5_rate(self):
         with tempfile.TemporaryDirectory() as tmp:
