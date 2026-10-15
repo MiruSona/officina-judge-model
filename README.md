@@ -164,7 +164,7 @@ python -I serve.py --model ~/.judgemodel/models/nli-studio-v1 --port 8092 --thre
 모델 자리는 `--model` 또는 환경 변수 `JUDGEMODEL_MODEL_DIR`. 모델 폴더에는 `model.onnx` · `tokenizer/tokenizer.json` · `model.json` · `calibration.json` 이 있다. 가중치가 2GB 를 넘는 몸통(XLM-R large)은 `model.onnx.data` 가 더 붙는다 — 같은 폴더에 같이 둔다. 모델 폴더를 옮길 때도 `model.onnx.data` 를 함께 옮긴다. 이 판에서 `model.json` 의 `onnx_sha256` 은 그래프(`model.onnx`)만 가리키고, 가중치 파일은 `onnx_data_sha256` 이 따로 가리킨다.
 `--backend torch` 는 물러설 길이다 (`export_onnx.py --with-torch` 로 `torch/` 를 같이 내보냈을 때).
 
-메인 PC 에서는 `run/serve-studio.ps1` 로 띄운다. `nli-studio-v2` 를 8092 에 띄우고, 이미 떠 있으면 `/health` 만 찍는다. 로그는 `~/.judgemodel/logs/serve-studio.{log,err}`.
+메인 PC 에서는 `run/serve-studio.ps1` 로 띄운다. 기본 `nli-studio-v4`(v1.1.0 · `--compat3`)를 8092 에 띄우고, 이미 떠 있으면 `/health` 만 찍는다. 로그는 `~/.judgemodel/logs/serve-studio.{log,err}`.
 로그온 때 저절로 뜨게 하려면 `run/serve-studio.ps1 -Register` 를 한 번 돌린다 (작업 이름 `JudgeModel-NLI` · 내릴 땐 `-Unregister`).
 
 ## 폴더 지도
