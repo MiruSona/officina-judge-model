@@ -1,7 +1,7 @@
 """JudgeModel NLI 판정 서버 — POST /judge {"evidence","claim"} → {"a","b","c"(,"d"),"model","ms"} · GET /health · GET /info.
 
 127.0.0.1 에만 붙는다. a 지지 · b 반대 · c 무관 · d 비슷한 계열 확률(온도 적용, 합 1)이고 model 은 학습 가중치
-SHA-256 앞 8자다. 이 응답 꼴이 다른 툴(예: AIMemoryTool 의 NLI 손님)과의 약속이다. 기본은 ONNX Runtime CPU 판이다.
+SHA-256 앞 8자다. 이 응답 꼴이 클라이언트와의 약속이다. 기본은 ONNX Runtime CPU 판이다.
 
 응답 칸은 model.json 의 `letters` 가 정한다 — 3칸 모델(옛 `nli-v1` 꼴)도 4칸 모델(`nli-v2` 꼴)도 같은 서버로 띄운다.
 `--compat3` 은 4칸 모델을 띄우되 d 를 c 에 더해 옛 3칸 꼴(`nli-v1`)로 답한다 — 판올림 전 손님용 물러설 길이다.
@@ -11,8 +11,10 @@ SHA-256 앞 8자다. 이 응답 꼴이 다른 툴(예: AIMemoryTool 의 NLI 손�
 `--compat3`)는 `nli4` 요청에 3칸으로 답하고 `label_set: "nli3"` 을 싣는다 — 손님은 응답의 `label_set` 을 읽는다.
 모르는 `label_set` 은 400. `GET /info` 는 판 번호 · 칸 세트 · 라벨 이름을 알린다.
 
-    python -I serve.py --model ~/.judgemodel/models/nli-studio-v3 --port 8092 --threads 4
-    python -I serve.py --model ~/.judgemodel/models/nli-studio-v3 --port 8092 --compat3     # 옛 손님용
+    python -I serve.py --model ~/.judgemodel/models/<모델> --port 8092 --threads 4
+    python -I serve.py --model ~/.judgemodel/models/<모델> --port 8092 --compat3     # 옛 손님용
+
+모델 폴더는 `--model` 또는 환경 변수 `JUDGEMODEL_MODEL_DIR` 로 준다. 둘 다 없으면 띄우지 않고 끝낸다.
 """
 import argparse
 import json
@@ -31,7 +33,7 @@ HOST = "127.0.0.1"
 DEFAULT_PORT = 8092
 MAX_BODY = 1 << 20          # 1MB — 근거 한 덩이로 넉넉하다. 더 크면 413
 READ_TIMEOUT = 10           # 초 — 몸통을 덜 보내고 멈춘 손님이 스레드를 붙잡지 않게
-DEFAULT_DIR = os.path.join("~", ".judgemodel", "models", "nli-studio-v1")
+MODEL_ENV = "JUDGEMODEL_MODEL_DIR"   # --model 이 없을 때 읽는 모델 폴더 환경 변수
 ALL_LETTERS = ["a", "b", "c", "d"]
 LETTERS_V1 = ALL_LETTERS[:3]
 # 응답 꼴 판 이름 — 칸 수로 정한다. model.json 의 protocol 이 있으면 그 값을 쓴다
@@ -298,15 +300,18 @@ def serving_shape(spec, compat3):
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")   # 모델 폴더 오류 같은 안내가 깨지지 않게
     ap = argparse.ArgumentParser(description="JudgeModel NLI 판정 서버 (127.0.0.1)")
-    ap.add_argument("--model", default=os.environ.get("JUDGEMODEL_MODEL_DIR", DEFAULT_DIR),
-                    help="모델 폴더 (model.onnx · tokenizer/ · model.json · calibration.json)")
+    ap.add_argument("--model", default=os.environ.get(MODEL_ENV, ""),
+                    help=f"모델 폴더 (model.onnx · tokenizer/ · model.json · calibration.json). 없으면 ${MODEL_ENV}")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--backend", choices=["onnx", "torch"], default="onnx")
     ap.add_argument("--compat3", action="store_true",
                     help="4칸 모델의 d 를 c 에 더해 옛 3칸 꼴(nli-v1)로 답한다 — 판올림 전 손님용")
     a = ap.parse_args()
+    if not a.model:
+        ap.error(f"모델 폴더를 모른다 — --model <모델 폴더> 를 주거나 환경 변수 {MODEL_ENV} 를 둔다")
 
     model_dir = os.path.abspath(os.path.expanduser(a.model))
     spec = load_spec(model_dir)

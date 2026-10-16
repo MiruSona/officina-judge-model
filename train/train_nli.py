@@ -22,7 +22,7 @@
 
 datasets · accelerate 없이 torch 와 transformers(AutoTokenizer · AutoModelForSequenceClassification)만 쓴다.
 멈춤 : NaN·inf 3 연속 → nan · 스왑 +256MB → swap · 멈춤 파일(JT_STOP_FILE) → 그 안의 까닭.
-게임 서버 · 「게임 서버가 있을 때 가용 < 10GB」는 컨테이너 안에서 못 본다(pid 이름공간이 다르다) — 감싸개
+같이 도는 다른 GPU 작업(WATCH_PROC) · 「그 작업이 있을 때 가용 < 10GB」는 컨테이너 안에서 못 본다(pid 이름공간이 다르다) — 감싸개
 (run/podman-train.sh · run/cpu-train.sh)가 보고 멈춤 파일을 쓴다. 심장 박동 60초 끊김도 감싸개 몫이다.
 """
 import argparse
@@ -143,7 +143,7 @@ def parse_args(argv=None):
     p.add_argument("--swap-max-mb", type=int, default=256, help="스왑이 시작보다 이만큼 늘면 멈춤 (0 = 끔)")
     p.add_argument("--heartbeat", default=os.environ.get("JT_HEARTBEAT", ""))
     p.add_argument("--stop-file", default=os.environ.get("JT_STOP_FILE", ""),
-                   help="이 파일이 생기면 검사점 저장 뒤 멈춘다 (감싸개가 게임 서버·메모리를 보고 쓴다)")
+                   help="이 파일이 생기면 검사점 저장 뒤 멈춘다 (감싸개가 다른 GPU 작업·메모리를 보고 쓴다)")
     p.add_argument("--run-id", default="")
     args = p.parse_args(argv)
     if args.grow_head and args.new_head:
@@ -407,7 +407,7 @@ def better(select, new, old):
     last 는 늘 참이다 — 마지막 평가가 best 가 된다. 저장은 run_eval 이 건너뛰고 학습 끝에 한 번만 한다.
     studio 의 함정 : 온도 전 거짓 지지 「개수」를 먼저 견주므로, 지지를 덜 내는 덜 배운 바퀴(1~2 바퀴째)가
     구조적으로 유리하다. 길 1 보강 반복 다섯 바퀴 중 네 번 이른 바퀴를 골랐다
-    (Docs/Research/2026-10-09-길1보강반복.md). 그래서 덧학습 기본은 last 다.
+    (비공개 작업 기록). 그래서 덧학습 기본은 last 다.
     """
     if old is None or select == "last":
         return True

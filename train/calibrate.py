@@ -25,7 +25,7 @@ FALSE_SUPPORT_SHARE = {3: 0.02, 4: 0.01}
 SURE_ACC = 0.90
 RELATED_PRECISION = 0.80
 UNSURE_MAX = 0.30
-# Go 판정기와 같은 「모른다」 선 (AIMemoryTool judge.go 의 UnsureBelow · tieGap 과 같은 뜻)
+# 클라이언트 판정기와 같은 「모른다」 선 (클라이언트의 UnsureBelow · tieGap 과 같은 뜻)
 UNSURE_BELOW = 0.40
 TIE_GAP = 0.01
 SUPPORT = 0

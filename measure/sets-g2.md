@@ -1,6 +1,6 @@
 # g2 b 자 — 후보 · 예약 · 겹침 (v1.2 B 판 단계 A-1)
 
-설계 `../Docs/Design/2026-10-12-v1.2-B판설계.md` 3절 · 5-1 · 7절. 후보 · 예약 본문은 git 밖 `~/.judgemodel/build/g2/` 에만 있다. 여기에는 수와 명령만 적는다.
+비공개 설계 3절 · 5-1 · 7절. 후보 · 예약 본문은 git 밖 `~/.judgemodel/build/g2/` 에만 있다. 여기에는 수와 명령만 적는다.
 해시 · 얼림 · 판정은 아직 안 했다(A-2 몫).
 
 ## 0. 결론
@@ -17,7 +17,7 @@
 | --- | --- | --- | --- |
 | `vitaminc-heldout` | 8,368 (b) | validation + test 의 실제 판 고침 REFUTES 전부 | 평가 몫 전용 |
 | `vitaminc-train` | 64,000 줄 = 32,000 짝 (a · b) | train 실제 판 고침에서 같은 판 고침 · 같은 주장에 SUPPORTS 근거와 REFUTES 근거가 다 있는 짝 | 학습 층 전용. 한쪽만 남은 짝 189 버림 |
-| `ko-revision` | 447 (수 바뀜 198) | 스튜디오 · 서브모듈 · 게임 저장소 md 의 한 줄 고침(-1 +1, 닮음 ≥ .6, 15자 이상) | 이름 바꾸기 277 · 덜 닮음 140 · 짧음 110 · Memory 등 폴더 427 거름 |
+| `ko-revision` | 447 (수 바뀜 198) | 사설 저장소 A · 그 서브모듈 · 사설 저장소 B md 의 한 줄 고침(-1 +1, 닮음 ≥ .6, 15자 이상) | 이름 바꾸기 277 · 덜 닮음 140 · 짧음 110 · Memory 등 폴더 427 거름 |
 | `ko-supersede` | 214 (짝 107 × 요약 · 제목) | 두 mem 저장소의 `superseded_by` 짝 | 잣대 기억에 걸린 짝 3 뺌 |
 | `klue` | 22,406 (그중 평가 쓸 것 1,779) | g1 `klue-mrc` 후보를 그대로 옮김 | 평가는 heldout 의 「답 없는 질문」 줄만(다시 쓸 때 가짜 답을 넣어 b 로) |
 
@@ -93,14 +93,14 @@
 
 ## 5. 명령
 
-`build/` 에서 돈다. `<게임 저장소>` · 서브모듈 경로는 손으로 채운다.
+`build/` 에서 돈다. `<repo-a>` · `<repo-b>` · `<store>` 자리는 자기 저장소 · 기억 저장소 경로로 채운다. `revision` · `supersede` 는 사설 메모 저장소용 선택 기능이다.
 
 ```
 python -I mine_public.py vitaminc-heldout --raw ~/.judgemodel/raw/2026-10-11/vitaminc --out ~/.judgemodel/build/g2
 python -I mine_public.py vitaminc-train   --raw ~/.judgemodel/raw/2026-10-11/vitaminc --out ~/.judgemodel/build/g2
-python -I mine_archive.py revision --repo studio=<스튜디오> --repo <툴>=<서브모듈> … --repo game=<게임 저장소> \
+python -I mine_archive.py revision --repo <repo-a>=<저장소 A> --repo <repo-b>=<저장소 B> … \
     --out ~/.judgemodel/build/g2 --names ~/.judgemodel/build/g1/names.txt --game-names ~/.judgemodel/build/g1/game-names.txt
-python -I mine_archive.py supersede --store studio=../../Memory/store --store game=<게임 저장소>/Memory/store \
+python -I mine_archive.py supersede --store <repo-a>=<store A> --store <repo-b>=<store B> \
     --forbid ~/.judgemodel/build/g2/forbid-ruler-ids.txt --out ~/.judgemodel/build/g2 --names … --game-names …
 cp ~/.judgemodel/build/g1/klue-mrc/{candidates.jsonl,groups.json} ~/.judgemodel/build/g2/klue/
 python -I make_sets.py reserve-g2 --build ~/.judgemodel/build/g2      # → reserve/reserve-g2.json · <셋>-b-cands.jsonl · train-layer-cands.jsonl
@@ -215,7 +215,7 @@ python -I ../train/freeze.py write --pairs ~/.judgemodel/sets/g2/<셋>.jsonl --o
 
 ## blind-g2 결과 (v1.2 B 판 · 판정 v6 · 조립 · 얼림, 2026-10-13)
 
-blind 는 사전 등록 뒤 한 판만 한 번 잰다(mem `20261011-06158b8f`). 이번 일은 만들고 얼리기까지다. 모델로 재지 않았다.
+blind 는 사전 등록 뒤 한 판만 한 번 잰다(사전 등록 규칙). 이번 일은 만들고 얼리기까지다. 모델로 재지 않았다.
 
 ### 셋 구성
 
@@ -257,7 +257,7 @@ blind 는 사전 등록 뒤 한 판만 한 번 잰다(mem `20261011-06158b8f`). 
 | `scrub.py check` | 0 건 (638줄) |
 | `label_guide` | support-v6 |
 
-- 금지 목록 : `~/.judgemodel/sets/g2/blind-g2.forbid.json` — 판정자에게 보인 후보 657줄 전부(KLUE skip 줄 포함)에서 뽑은 기억 id 1 · 문서 경로 33 · 커밋 54 · 묶음 325 · 출처 id 681 · 후보 id 657 · 쌍 열쇠 640. 학습 · 합성 · 덧학습 금지 목록에 이 파일을 더한다(설계 7절, mem `20261011-7c8f4d5a`).
+- 금지 목록 : `~/.judgemodel/sets/g2/blind-g2.forbid.json` — 판정자에게 보인 후보 657줄 전부(KLUE skip 줄 포함)에서 뽑은 기억 id 1 · 문서 경로 33 · 커밋 54 · 묶음 325 · 출처 id 681 · 후보 id 657 · 쌍 열쇠 640. 학습 · 합성 · 덧학습 금지 목록에 이 파일을 더한다(설계 7절).
 - protocol-g2 의 `TODO-blind-g2` 자리에 위 sha256 을 넣는다(이 판은 protocol-g2.json 을 안 건드렸다).
 
 ### 명령 (blind-g2)

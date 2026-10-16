@@ -1,6 +1,6 @@
 """layer_g4bal — v1.2 K4 원천 균형 층 train-g4-bal (v5 표본 뽑기 → 새 판정 후보 뽑기 → 조립).
 
-설계 `../Docs/Design/2026-10-14-v1.2-원천균형판설계.md` 1-1 · 1-2 · 2절 · 3절 · 5-5 ②. 쌍 본문은 화면에 찍지 않는다.
+비공개 설계 1-1 · 1-2 · 2절 · 3절 · 5-5 ②. 쌍 본문은 화면에 찍지 않는다.
 
     python -I layer_g4bal.py sample-v5 --g4 ~/.judgemodel/build/g4 [--v5 <train-g1-II.jsonl> …]
     → <g4>/train-g4-bal/sample-v5.jsonl · sample-v5-summary.json   (2-1 층별 200줄 · label_batches.py make --mode train 에 넣는다)

@@ -9,7 +9,7 @@ DECISIONS = [
     {"id": "20261001-aaaa0001", "date": "2026-10-01", "scope": "judgemodel", "summary": "기본 서버 포트는 8092 로 둔다"},
     {"id": "20261002-aaaa0002", "date": "2026-10-02", "scope": "judgemodel", "summary": "측정 결과는 git 밖에만 둔다"},
     {"id": "20261005-aaaa0003", "date": "2026-10-05", "scope": "officina", "summary": "커밋은 사용자 승인 뒤에만 한다"},
-    {"id": "20261005-aaaa0004", "date": "2026-10-05", "scope": "officina", "summary": "키는 sk-ABCDEFGHIJKLMNOPQRSTUV 를 쓴다"},
+    {"id": "20261005-aaaa0004", "date": "2026-10-05", "scope": "officina", "summary": "키는 sk-TESTABCDEFGHIJKLMNOPQR 를 쓴다"},
     {"id": "20261010-aaaa0005", "date": "2026-10-10", "scope": "judgemodel", "summary": "보고가 남긴 바로 그 결정이다"},
     {"id": "20261012-aaaa0006", "date": "2026-10-12", "scope": "judgemodel", "summary": "보고 날 뒤에 생긴 결정이다"},
 ]

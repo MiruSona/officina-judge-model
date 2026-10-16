@@ -13,7 +13,7 @@ fold40 은 문장 쌍이 아니라 **기억 짝**이다. 한 줄 꼴 :
 
 「담김(작은 Z, 큰 W)」 = Z 의 요약 + 본문 문장(최대 5)을 하나씩 주장으로, W 의 정렬된 문장 묶음을 근거로 묻는다.
 모든 문장이 확신 a(≥ nli_sure_support)이고 어느 문장도 확신 b(≥ nli_sure)가 아니면 담김이다.
-fold40 의 sentences · evidence 는 손님(AIMemoryTool) FoldClaims · FoldEvidence 출력을 그대로 박아야 한다
+fold40 의 sentences · evidence 는 클라이언트의 FoldClaims · FoldEvidence 출력을 그대로 박아야 한다
 (sentences 는 FoldClaims 의 둘째 줄부터 — 첫 줄 요약은 summary 칸이다).
 손님은 근거를 닮은 순으로 줄 세우고 480룬에서 자르고 12자 미만 문장을 거르는데, 여기서는 그 일을 다시 하지 않는다.
 그래서 `evidence` 가 없는 줄은 HTTP 를 부르기 전에 거절한다 — 손님과 다른 글로 재면 잰 값이 손님 판정을 대표하지 않는다.

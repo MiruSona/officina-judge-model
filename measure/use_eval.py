@@ -1,4 +1,5 @@
-"""실사용 측정 use1 — mem 이 실제로 묻는 자리에서 v1.0.0 · v1.1.0 견주기 (설계 `Docs/Design/2026-10-12-실사용측정설계.md`).
+"""실사용 측정 use1 — mem 이 실제로 묻는 자리에서 v1.0.0 · v1.1.0 견주기 (비공개 설계).
+선택 기능 — 사설 메모 저장소용. 예시 경로는 자기 환경에 맞춘다.
 하위명령 차례는 measure/README.md 7항. 모듈마다 use_sites/ 에서 register 로 더하고, 쓰기는 ~/.judgemodel/measure/use1/<별명>/ 안뿐이다.
 """
 import argparse

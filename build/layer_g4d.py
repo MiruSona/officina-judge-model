@@ -1,6 +1,6 @@
 """layer_g4d — v1.2 K3 판 d 층 train-g4-d (같은 대상 · 근거에 없는 사실 d 후보 뽑기 → 판정 → 조립).
 
-설계 `../Docs/Design/2026-10-14-v1.2-K3-공개원천d보강판설계.md` 4-1 · 4-2 · 4-4 · 4-5 · 5절 ①. 쌍 본문은 화면에 찍지 않는다.
+비공개 설계 4-1 · 4-2 · 4-4 · 4-5 · 5절 ①. 쌍 본문은 화면에 찍지 않는다.
 
     python -I layer_g4d.py pick  --g4 ~/.judgemodel/build/g4 [--old-root ~/.judgemodel] [--dry-run] [--force]
     → <g4>/train-g4-d/pick.jsonl · pick-summary.json   (label_batches.py make --mode train 에 넣는다)

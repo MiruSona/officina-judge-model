@@ -1,12 +1,13 @@
 """seed_contrast — 실물 한국어 문장 씨앗 → 한 자리만 바꾼 b · 같은 값 다른 꼴 a · 다른 때 d 의 생성 입력 (K 판 ⑤ 앞부분).
+선택 기능 — 사설 메모 저장소용. 예시 경로는 자기 환경에 맞춘다.
 
-설계 `../Docs/Design/2026-10-13-v1.2-한국어b보강판설계.md` 3-3 · 4-1 · 7절. 씨앗 · 초안 본문은 git 밖(`~/.judgemodel/build/g3/seed/`)에만 쓴다.
+비공개 설계 3-3 · 4-1 · 7절. 씨앗 · 초안 본문은 git 밖(`~/.judgemodel/build/g3/seed/`)에만 쓴다.
 
     python -I seed_contrast.py count --out ~/.judgemodel/build/g3/seed                 # 씨앗 세기 → seeds-all.jsonl · count.json
     python -I seed_contrast.py make  --out ~/.judgemodel/build/g3/seed [--n 450]       # 자리 · 새 값 · 초안 → input.jsonl · sample50.jsonl
     python -I seed_contrast.py check --in <생성 결과 또는 input.jsonl> [--out 결과.jsonl]  # 기계 검사 (한 덩이 · 새 값 · 길이 · 물음꼴 · 부정어 · scrub)
 
-게임 저장소 문장은 쓰지 않는다. 금지 목록(g1 · g2 평가 묶음 · blind-g2.forbid · use1 · 잣대 기억)에 걸린 문서 · 기억은 통째로 뺀다.
+사설 저장소 B 문장은 쓰지 않는다. 금지 목록(g1 · g2 평가 묶음 · blind-g2.forbid · use1 · 잣대 기억)에 걸린 문서 · 기억은 통째로 뺀다.
 
 K4 archive 씨앗 (원천 균형 판 설계 3-2) — 근거를 씨앗 문장 하나가 아니라 그 문장이 든 문단으로 :
     python -I seed_contrast.py count --out ~/.judgemodel/build/g4/seed-arch --evidence paragraph [--exclude-seeds <K 씨앗 input.jsonl>]
@@ -385,7 +386,7 @@ def _decode_git_path(path):
 
 
 def _studio_path(repo, path):
-    """(저장소 이름, 그 안 경로) → 스튜디오 뿌리 기준 경로. 게임 저장소면 None."""
+    """(저장소 이름, 그 안 경로) → 사설 저장소 A 뿌리 기준 경로. 사설 저장소 B 면 None."""
     if repo == "game":
         return None
     path = unicodedata.normalize("NFC", path.replace("\\", "/").lstrip("/"))
@@ -393,7 +394,7 @@ def _studio_path(repo, path):
 
 
 def group_to_key(group):
-    """평가 셋 묶음 → ("doc", 스튜디오 경로) · ("mem", 덩이) · None (공개 자료 · 게임)."""
+    """평가 셋 묶음 → ("doc", 사설 저장소 A 경로) · ("mem", 덩이) · None (공개 자료 · 사설 저장소 B)."""
     if not group:
         return None
     if group.startswith("doc:"):
@@ -541,7 +542,7 @@ def _paragraphs(doc):
 
 
 def read_sources(studio_root, evidence="seed"):
-    """스튜디오 문서(Docs 아래 md) · 기억 → 문장 줄 [{source, path|mem_id, group, text}].
+    """사설 저장소 A 문서(Docs 아래 md) · 기억 → 문장 줄 [{source, path|mem_id, group, text}].
     evidence 가 paragraph 면 문서 줄에 paragraph 칸을 붙이고 기억 줄은 안 읽는다(문단이 없다)."""
     rows = []
     for doc in ma.read_docs([("studio", studio_root)]):
@@ -1047,7 +1048,7 @@ def main(argv=None):
     sub.choices["count"].add_argument("--exclude-seeds", nargs="*", default=None,
                                       help="뺄 K 씨앗 파일 (seed 칸). paragraph 꼴 기본 <judge-root>/build/g3/seed/input.jsonl")
     sub.choices["make"].add_argument("--domain", default="archive", help="paragraph 꼴 줄의 domain (기본 archive)")
-    sub.choices["count"].add_argument("--studio", default=_default_studio(), help="스튜디오 뿌리")
+    sub.choices["count"].add_argument("--studio", default=_default_studio(), help="사설 저장소 뿌리 (기본 이 저장소의 상위 폴더)")
     sub.choices["count"].add_argument("--allow-missing", action="store_true", help="시험용 — 금지 목록 파일이 없어도 돈다")
     sub.choices["make"].add_argument("--n", type=int, default=TARGET)
     sub.choices["make"].add_argument("--seed", type=int, default=SEED)

@@ -1,6 +1,6 @@
 """public_pick — 공개셋(KoBEST BoolQ · KLUE 답 있는 질문) 후보에서 판정할 줄을 뽑고, v6 두 판정을 합친다 (K 판).
 
-설계 `../Docs/Design/2026-10-13-v1.2-한국어b보강판설계.md` 2-3 · 3-2 · 3-5 · 4-1. 본문은 git 밖(`~/.judgemodel/build/g3/boolq/` · `klue/`)에만 쓴다.
+비공개 설계 2-3 · 3-2 · 3-5 · 4-1. 본문은 git 밖(`~/.judgemodel/build/g3/boolq/` · `klue/`)에만 쓴다.
 판정 합치기 · 합본은 `wiki_pick` 의 함수를 그대로 쓴다(같은 판 파일 꼴 · 같은 keep 규칙).
 
     python -I public_pick.py pick  --src <dev-rw.jsonl> <test-rw.jsonl> --check <dev-rw.check.jsonl> <test-rw.check.jsonl>

@@ -1,11 +1,12 @@
 """scrub — 쌍을 넣기 전 누출 거르기 · 검사 (설계 d자료층재구축 4-2).
+선택 기능 — 사설 메모 저장소용. 예시 경로는 자기 환경에 맞춘다.
 
 규칙
   1. 작성자 이름 · 메일이 든 줄은 버린다 (Author: · Signed-off-by: · 메일 주소).
   2. 사용자 경로(C:\\Users\\… · /home/… · /Users/…)는 `<경로>` 로 바꾼다.
-  3. 키 · 토큰 꼴이 든 쌍은 통째로 버린다 (commit-prep 검사기와 같은 꼴을 이 툴 안에 따로 적음).
+  3. 키 · 토큰 꼴이 든 쌍은 통째로 버린다 (흔한 비밀 키 꼴을 이 툴 안에 적음).
   4. 이름 목록(참고 프로젝트 이름 등, git 밖 파일)이 든 쌍은 버린다.
-  5. 게임 저장소 이름은 `<게임>` 으로 바꾼다.
+  5. 비공개 저장소 B 의 이름은 `<게임>` 으로 바꾼다.
 
     python -I scrub.py apply --in pairs.jsonl --out clean.jsonl --names <목록> --game-names <목록>
     python -I scrub.py check --in clean.jsonl --names <목록> --game-names <목록>     # 0건이어야 exit 0

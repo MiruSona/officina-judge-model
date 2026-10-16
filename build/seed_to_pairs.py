@@ -1,6 +1,6 @@
 """seed_to_pairs — 다듬은 씨앗(b · a · d 세 줄)을 학습 쌍 꼴로 펴고, v6 두 판정을 합치고, g3 금지 목록을 낸다 (K 판 ⑨).
 
-설계 `../Docs/Design/2026-10-13-v1.2-한국어b보강판설계.md` 3-3 · 4-1. 본문은 git 밖(`~/.judgemodel/build/g3/seed/`)에만 쓴다.
+비공개 설계 3-3 · 4-1. 본문은 git 밖(`~/.judgemodel/build/g3/seed/`)에만 쓴다.
 
     python -I seed_to_pairs.py pairs  --in <out-450-opus.jsonl> --out <seed>/pairs.jsonl
     python -I seed_to_pairs.py judge  --pairs <pairs.jsonl> --j1 <j1.jsonl> --j2 <j2.jsonl> --out <seed>/judged.jsonl

@@ -1,6 +1,6 @@
 """pick_contrast — v1.2 B 판 학습 층 train-g2-b : VitaminC 대조쌍 짝 고르기 · 판정 뒤 짝 규칙.
 
-설계 `../Docs/Design/2026-10-12-v1.2-B판설계.md` 5-1. 쌍 본문은 화면에 찍지 않는다.
+비공개 설계 5-1. 쌍 본문은 화면에 찍지 않는다.
 
     python -I pick_contrast.py pick --cands <g2>/reserve/train-layer-cands.jsonl --sets <얼린 셋.jsonl> … \
         --forbid <셋.forbid.json> … --out <g2>/train-g2-b/cands.jsonl [--n 650] [--qual-share 0.55]

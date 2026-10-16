@@ -1,6 +1,6 @@
 """label_batches — Opus 라벨 묶음 만들기 · 답 합치기 · 합의 · κ · 정답셋 뽑기 · 사람 목록.
 
-설계 `../Docs/Design/2026-10-11-d자료층재구축설계.md` 2-4 · 3-3, 프롬프트 `../Docs/Guide/라벨프롬프트-g1.md`.
+비공개 설계 2-4 · 3-3, 프롬프트 `../Docs/Guide/라벨프롬프트-g1.md`.
 판정자는 `<out>/batches/` 만 본다. 대응표 `<out>/map/` 는 판정자에게 안 주고, `--out` 은 git 밖이어야 한다.
 
     python -I label_batches.py traps  --dev-r2 <dev-r2.jsonl> --ruler4 <ruler4 폴더> --pool <trap-pool.jsonl>
@@ -82,7 +82,7 @@ def inside_git(path):
 def build_trap_pool(dev_rows, ruler4_inputs, ruler4_gold):
     """사람 라벨이 확실한 쌍만 함정으로 — a : same·long 지지 · b : flip 아닌 반대 · c : xscope 무관 · d : 사람 감사 d.
 
-    flip 반대는 뜻이 안 뒤집힌 쌍이 섞여 함정으로 못 쓴다 (mem 20261010-425aa4ed).
+    flip 반대는 뜻이 안 뒤집힌 쌍이 섞여 함정으로 못 쓴다 (2026-10-10 확인).
     """
     pool = []
     for row in dev_rows:

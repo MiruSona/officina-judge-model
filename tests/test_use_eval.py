@@ -191,7 +191,7 @@ class SecretTest(unittest.TestCase):
     """비밀 거름 한 벌 — ④ reports · ⑤ harness 가 같이 쓴다 (두 모듈 규칙의 합집합)."""
 
     def test_kinds(self):
-        self.assertEqual(common.secret_kind("키는 sk-ABCDEFGHIJKLMNOPQRSTUV"), "key")
+        self.assertEqual(common.secret_kind("키는 sk-TESTABCDEFGHIJKLMNOPQR"), "key")
         self.assertEqual(common.secret_kind("api_key = abcdef123"), "assign")
         self.assertEqual(common.secret_kind('password = "hunter22"'), "assign")
         self.assertEqual(common.secret_kind("서버 192.168.0.30 에 둔다"), "ip")

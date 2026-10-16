@@ -1,6 +1,6 @@
 # 기준선 B2 — g3 셋으로 다시 잼 (v1.2 K 판 소단계 20)
 
-설계 `../Docs/Design/2026-10-13-v1.2-한국어b보강판설계.md` 1절 9번 · 5-2. 셋 수와 해시는 `sets-g3.md` 14절.
+비공개 설계 1절 9번 · 5-2. 셋 수와 해시는 `sets-g3.md` 14절.
 
 ## 결론
 
@@ -61,12 +61,12 @@ calibration T (dev-cal-g3) : 2.25 · 2.35 · 2.35 · 2.4 · 2.45.
 
 | 자리 | 값 |
 | --- | --- |
-| 스크립트 | 미니PC `~/judgetool/logs/g3-B2-base.sh` (`g2-B4h.sh` eval_one · `g2-B2B4.sh` baseline 단계를 g3 로 바꿈, 복사본 `~/.judgemodel/runs/g3-B2-base/`) |
+| 스크립트 | 학습 기계 `$JT_ROOT/logs/g3-B2-base.sh` (`g2-B4h.sh` eval_one · `g2-B2B4.sh` baseline 단계를 g3 로 바꿈, 복사본 `~/.judgemodel/runs/g3-B2-base/`) |
 | 평가 인자 | `--max-len 320 --device cuda --dtype fp32 --batch 64 --public-neutral cd --protocol src/measure/protocol-g3.json` |
 | 셋 | `mem/g3/{dev-cal-g3,dev-cmp-g3}.jsonl` · 잣대 `mem/g2/ruler3.jsonl` · 곁 자 k48 · mnli-devm2000 · klue-dev |
 | 해시 | 머리에서 `freeze.py check` 넷(dev-cal · dev-cmp · blind · train-g3-ko) ok. 규약 sha256 4469292e… , dev-cmp e81ab88f… |
-| 코드 | 미니PC `src/measure/compare.py` 를 메인 PC 판(sha256 6d824a8f…)으로 맞춤. `baseline.py` · `calibrate.py` · `eval_nli.py` · `freeze.py` 는 원래 같았다 |
-| 조건 | llama 내림 · 게임 서버는 둔 채 (평가만이라) |
+| 코드 | 학습 기계 `src/measure/compare.py` 를 작업 PC 판(sha256 6d824a8f…)으로 맞춤. `baseline.py` · `calibrate.py` · `eval_nli.py` · `freeze.py` 는 원래 같았다 |
+| 조건 | llama 내림 · 다른 GPU 작업은 둔 채 (평가만이라) |
 | 시간 | 21:58:47 → 22:10:28, **11분 41초** (씨앗 하나 약 2분 15초, baseline 19초) |
 | 메모리 | llama 내린 뒤 가용 51,243MB → 단계마다 51,135~51,818MB (감시 로그 gtt=17) |
 | 스왑 | 80MB → 80MB (**+0**) |

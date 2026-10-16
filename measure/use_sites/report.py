@@ -1,4 +1,5 @@
 """report — 얼린 use1 셋(①~③ · ④ · ⑤)의 수치 · 95% 구간 · 짝 차이 · McNemar · result.md (설계 2절 · 8절).
+선택 기능 — 사설 메모 저장소용. 예시 경로는 자기 환경에 맞춘다.
 구간 · McNemar 는 compare.py 를 그대로 부르고, 지표마다 「셀 쌍(mask) · 나쁜 일(event)」 로 compare 쌍 표 꼴을 만든다.
 """
 import collections
@@ -386,5 +387,5 @@ def register(sub):
     s.add_argument("--alias", required=True, help="A[,B] — 결과는 첫 별명 폴더에")
     s.add_argument("--place", type=int, choices=(4, 5), default=None,
                    help="그 판만 result-N.md 로 (없으면 얼린 판 전부를 result.md 로)")
-    s.add_argument("--examples", action="store_true", help="T5 에 원문 보기 (스튜디오만)")
+    s.add_argument("--examples", action="store_true", help="T5 에 원문 보기 (사설 저장소 A 만)")
     s.set_defaults(func=cmd_report)

@@ -1,7 +1,7 @@
 # 라벨 기준 `support-v5` (판정 넷 · 범용)
 
 g1 셋(dev-cal · dev-cmp · blind-g1 · gold-g1)과 Ⅱ · ㄱ 학습 쌍에 라벨을 붙일 때 쓰는 기준이다. 사람 · Opus 라벨러에게 이 글을 **그대로** 준다.
-원문은 `../Design/2026-10-11-d자료층재구축설계.md` 2-1 · 2-2 절이다. 고칠 때는 둘을 같이 고친다.
+d 자료 층 재구축 설계(2026-10-11)에서 나왔다. 설계 원문은 공개하지 않으므로 이 문서를 기준 원문으로 본다.
 
 - `support-v5` = `support-v4` 의 네 칸 **+ c/d 를 「같은 대상」 하나로 가름 + 예/아니오 셋으로 묻는 2단 지침**.
 - 옛 셋(train-r2 · dev-r2 · blind v3 · v4)은 v4 기준 그대로 둔다. v4 문서(`라벨기준support-v4.md`)는 지우지 않는다.
@@ -92,7 +92,7 @@ g1 셋(dev-cal · dev-cmp · blind-g1 · gold-g1)과 Ⅱ · ㄱ 학습 쌍에 �
 | `related` · `d` | 비슷한 계열 | train · dev · blind |
 | `cd` | c 와 d 중 하나 (못 고름) | **train 만.** `split_pairs.py` 가 dev 에 들어가면 멈춘다 |
 
-- g1 셋은 줄에 `label_guide: "support-v5"` 를 적어 v4 쌍과 섞이지 않게 한다(소단계 45 에서 넣음).
+- g1 셋은 줄에 `label_guide: "support-v5"` 를 적어 v4 쌍과 섞이지 않게 한다.
 
 ## 5. v4 와 달라진 점
 

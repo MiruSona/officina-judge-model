@@ -1,5 +1,5 @@
 #!/bin/bash
-# podman-train.sh — 미니PC GPU 로 JudgeModel 학습 스크립트를 띄우고 감시한다 (설계 3-3 · 8-1).
+# podman-train.sh — 학습 기계의 GPU(ROCm 컨테이너)로 JudgeModel 학습 스크립트를 띄우고 감시한다 (설계 3-3 · 8-1).
 #
 #   run/podman-train.sh [-e KEY=VAL]... [--name NAME] <src 기준 스크립트> [스크립트 인자...]
 #   예) run/podman-train.sh -e TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=0 --name base-2 \
@@ -13,9 +13,9 @@
 #           --dev mem/r2/dev-r2.jsonl --out runs/r2-01 --epochs 4 --batch 16 --warmup 0.10 --eval-every 0 \
 #           --select last --collapse-acc 0 --max-len 320 --lr 1e-5 --seed 1
 #
-# 자리 : 호스트 ~/judgetool (JT_ROOT) 을 컨테이너 /work 로 붙이고 작업 폴더도 /work 다 — 상대 경로 인자는 JT_ROOT 기준.
+# 자리 : 호스트 작업 뿌리 JT_ROOT (기본 ~/judgemodel-work) 를 컨테이너 /work 로 붙이고 작업 폴더도 /work 다 — 상대 경로 인자는 JT_ROOT 기준.
 # 코드는 /work/src, 로그는 logs/<NAME>.log, 심장 박동 logs/<NAME>.heartbeat, 멈춤 파일 logs/<NAME>.stop.
-# 감시 규칙은 run/watch-lib.sh. 게임 서버 이름은 git 밖 $JT_ROOT/env.sh 의 JUDGEMODEL_GAME_PROC 로 받는다.
+# 감시 규칙은 run/watch-lib.sh. 같이 도는 다른 GPU 작업 이름은 git 밖 $JT_ROOT/env.sh 의 WATCH_PROC 로 받는다.
 # -e 값은 로그인 셸이 /etc/profile.d 를 읽은 뒤 env 로 다시 건다. 이미지 profile 이
 # TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1 을 export 해서 podman -e 로는 0 이 덮여 버린다 (N1 실측).
 # GPU 메모리는 GTT 라 cgroup 이 다 못 잡는다. --memory 는 호스트 RAM 몫 상한이고, 진짜 상한 노릇은 감시가 한다.
@@ -55,7 +55,7 @@ rm -f "$hb_host" "$stop_host"
 digest=$(podman image inspect --format '{{.Digest}}' "$IMAGE" 2>/dev/null || echo "")
 
 watch_init
-log_line "start name=$name script=$script args=$* envs=${envs[*]:-} image=$IMAGE digest=$digest mem=$MEM_LIMIT game=$game0 | $(mem_line)"
+log_line "start name=$name script=$script args=$* envs=${envs[*]:-} image=$IMAGE digest=$digest mem=$MEM_LIMIT watch=$proc0 | $(mem_line)"
 
 podman run --rm --name "$container" \
   --device /dev/kfd --device /dev/dri --group-add keep-groups \

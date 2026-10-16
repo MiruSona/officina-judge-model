@@ -1,4 +1,5 @@
 """labels · freeze — 라벨 묶음(build/label_batches.py 감싸기) · 사람 목록 · 얼리기 (설계 6절 · 2-3 freeze).
+선택 기능 — 사설 메모 저장소용. 예시 경로는 자기 환경에 맞춘다.
 사람 답은 `<라벨 폴더>/human.jsonl` 에 {"id","label"} 로 적고 Opus 합의를 이긴다. 얼린 쌍 열쇠는 use1/EXCLUDE.sha256list 에 더한다.
 """
 import json

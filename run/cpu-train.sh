@@ -1,5 +1,5 @@
 #!/bin/bash
-# cpu-train.sh — 미니PC CPU 로 JudgeModel 학습 스크립트를 띄우고 감시한다 (설계 3-3 · 2순위 길).
+# cpu-train.sh — 학습 기계의 CPU 로 JudgeModel 학습 스크립트를 띄우고 감시한다 (설계 3-3 · 2순위 길).
 #
 #   run/cpu-train.sh [--name NAME] <src 기준 스크립트> [스크립트 인자...]
 #   예) run/cpu-train.sh --name base-cpu train/train_nli.py --device cpu --dtype fp32 --batch 16 --accum 2 ...
@@ -42,7 +42,7 @@ stop_file="$JT_ROOT/logs/$name.stop"
 rm -f "$hb" "$stop_file"
 
 watch_init
-log_line "start name=$name script=$script args=$* venv=$VENV mem=$MEM_MAX game=$game0 | $(mem_line)"
+log_line "start name=$name script=$script args=$* venv=$VENV mem=$MEM_MAX watch=$proc0 | $(mem_line)"
 
 cd "$JT_ROOT" || exit 2
 systemd-run --user --scope --quiet -p MemoryMax="$MEM_MAX" -p MemorySwapMax=0 \

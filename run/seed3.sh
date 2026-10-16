@@ -1,5 +1,5 @@
 #!/bin/bash
-# seed3.sh — 한 조건을 씨앗 1·2·3 으로 차례로 학습 · 평가 · 문턱 고르기 (d 자료 층 설계 2-3, 미니PC 에서 돈다).
+# seed3.sh — 한 조건을 씨앗 1·2·3 으로 차례로 학습 · 평가 · 문턱 고르기 (d 자료 층 설계 2-3, 학습 기계에서 돈다).
 #
 #   run/seed3.sh <조건> -- <train_nli 인자...>
 #   예) run/seed3.sh B0 -- --device cuda --dtype bf16 --init runs/base-2/ckpt-best --grow-head 4 --stage studio \
@@ -11,7 +11,7 @@
 # 판마다 runs/<판>/eval-<셋>/{pred.jsonl,summary.json} · calibration.json(dev-cal 로) · eval-side.txt 가 생긴다.
 # 그다음 measure/compare.py 로 견준다 (measure/README.md).
 #
-# 환경 변수 (자리는 JT_ROOT=~/judgetool 기준 상대 경로)
+# 환경 변수 (자리는 작업 뿌리 JT_ROOT 기준 상대 경로 · 기본 ~/judgemodel-work)
 #   G1_DEV_CAL   문턱 고르는 셋        (기본 mem/g1/dev-cal-g1.jsonl)
 #   G1_DEV_CMP   견주는 셋             (기본 mem/g1/dev-cmp-g1.jsonl)
 #   G1_SIDE      곁 자 「이름:파일」 공백 목록 (기본 k48 · mnli-devm2000 · klue-dev)
@@ -40,7 +40,7 @@ for arg in "$@"; do
   esac
 done
 
-JT_ROOT="${JT_ROOT:-$HOME/judgetool}"
+JT_ROOT="${JT_ROOT:-$HOME/judgemodel-work}"
 DEV_CAL="${G1_DEV_CAL:-mem/g1/dev-cal-g1.jsonl}"
 DEV_CMP="${G1_DEV_CMP:-mem/g1/dev-cmp-g1.jsonl}"
 SIDE="${G1_SIDE:-k48:data/mem/k48.jsonl mnli-devm2000:data/prep/mnli-devm-eval2000.jsonl klue-dev:data/prep/klue-dev.jsonl}"

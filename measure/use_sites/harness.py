@@ -1,4 +1,5 @@
 """⑤ harvest-harness — localharness G5 얼린 셋 · 지난 runs 판정 기록을 규칙 축약(bm25 2줄 · 320토큰) 쌍으로 거둔다 (설계 4-2).
+선택 기능 — 사설 메모 저장소용. 예시 경로는 자기 환경에 맞춘다.
 하네스 쪽(~/.localharness)은 읽기만 한다. 쓰기는 use1/<별명>/collect/ 안뿐이다.
 """
 import glob
@@ -14,7 +15,7 @@ from bm25 import BM25  # noqa: E402  build/ 는 common 이 import 길에 넣는�
 
 DEFAULT_ALIAS = "harness"
 LH_HOME = os.path.join("~", ".localharness")
-TOKENIZER_DEFAULT = os.path.join("~", ".judgemodel", "models", "nli-studio-v4", "tokenizer", "tokenizer.json")
+MODEL_ENV = "JUDGEMODEL_MODEL_DIR"   # 기본 토크나이저를 찾는 모델 폴더 환경 변수
 OUT_PARTS = ("collect", "harness-pairs.jsonl")
 MANIFEST_PARTS = ("collect", "harvest-harness.log.jsonl")
 
@@ -41,6 +42,12 @@ COUNT_SCRIPT = (
 
 
 # ---------------------------------------------------------------- 토큰 세기
+
+def default_tokenizer():
+    """모델 폴더($JUDGEMODEL_MODEL_DIR) 안의 tokenizer.json. 환경 변수가 없으면 빈 값 — 글자 수 어림으로 센다."""
+    model_dir = os.environ.get(MODEL_ENV, "")
+    return os.path.join(model_dir, "tokenizer", "tokenizer.json") if model_dir else ""
+
 
 class TokenCounter:
     """XLM-R 토크나이저(서빙 venv 의 tokenizers)로 센다. 못 띄우면 글자 수 어림."""
@@ -299,6 +306,8 @@ def cmd_harvest_harness(a):
         got, judged, skipped = runs_rows(runs_dir, a.since)
         raw += got
         runs_info = {"judge_files": judged, "rows": len(got), "skipped_no_claim": skipped, "since": a.since}
+    if not a.tokenizer:
+        print(f"토크나이저를 모른다 (--tokenizer · ${MODEL_ENV} 둘 다 없음) — 글자 수 어림으로 센다")
     counter = TokenCounter(os.path.expanduser(a.tokenizer), a.python or servers.serving_python())
     try:
         new, counts = harvest(raw, common.read_jsonl(out_path), counter)
@@ -324,6 +333,7 @@ def register(sub):
     s.add_argument("--judge-sets", nargs="?", const=os.path.join(LH_HOME, "judge-sets"), default=None)
     s.add_argument("--runs", nargs="?", const=os.path.join(LH_HOME, "runs"), default=None)
     s.add_argument("--since", default="")
-    s.add_argument("--tokenizer", default=TOKENIZER_DEFAULT)
+    s.add_argument("--tokenizer", default=default_tokenizer(),
+                   help=f"tokenizer.json (기본 ${MODEL_ENV}/tokenizer/tokenizer.json · 없으면 글자 수 어림)")
     s.add_argument("--python", default="", help="tokenizers 가 든 python (기본 서빙 venv)")
     s.set_defaults(func=cmd_harvest_harness)

@@ -1,6 +1,6 @@
 """layer_g3 — v1.2 K 판 학습 층 train-g3-ko 조립 (원천 다섯 → 상한 맞춘 한 파일).
 
-설계 `../Docs/Design/2026-10-13-v1.2-한국어b보강판설계.md` 3-1 · 3-3 · 4-1 · 8-2. 쌍 본문은 화면에 찍지 않는다.
+비공개 설계 3-1 · 3-3 · 4-1 · 8-2. 쌍 본문은 화면에 찍지 않는다.
 
     python -I layer_g3.py build --g3 ~/.judgemodel/build/g3 [--targets <json>] [--seed 20261013] \
         [--eval <평가 셋.jsonl> …] [--forbid-json <셋.forbid.json> …] [--old-root ~/.judgemodel] [--no-old-forbid] [--out-dir <폴더>]

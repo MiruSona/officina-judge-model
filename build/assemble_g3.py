@@ -1,6 +1,6 @@
 """assemble_g3 — v1.2 K 판 g3 평가 셋 셋 조립 · 얼림 · 검사 · 규약 해시 채우기.
 
-설계 `../Docs/Design/2026-10-13-v1.2-한국어b보강판설계.md` 2-3 · 5-1. 쌍 본문은 화면에 찍지 않는다. 수는 `../measure/sets-g3.md` 11절.
+비공개 설계 2-3 · 5-1. 쌍 본문은 화면에 찍지 않는다. 수는 `../measure/sets-g3.md` 11절.
 
     python -I assemble_g3.py assemble --set dev-cmp-g3|dev-cal-g3|blind-g3 [--dest ~/.judgemodel/sets/g3] [--draft] \
         [--build ~/.judgemodel/build/g3] [--g2-dir ~/.judgemodel/sets/g2] [--dirs <판정 폴더> …]

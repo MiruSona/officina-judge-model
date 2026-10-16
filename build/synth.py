@@ -1,6 +1,6 @@
 """synth — ㄴ 실물 씨앗 다시 쓰기(합성) : 씨앗 뽑기 · Opus 다시쓰기 묶음 · 답 거두기 · 합성 d 상한 셈.
 
-설계 `../Docs/Design/2026-10-11-d자료층재구축설계.md` 5절. 쌍 본문은 git 밖(`~/.judgemodel/build/g1/synth/`)에만 쓴다.
+비공개 설계 5절. 쌍 본문은 git 밖(`~/.judgemodel/build/g1/synth/`)에만 쓴다.
 
     python -I synth.py seeds   --train <학습 셋.jsonl> … --pred <sN-II.pred.jsonl> <sN-arch.pred.jsonl> … --out seeds.jsonl [--cap N]
     python -I synth.py make    --seeds seeds.jsonl --out <다시쓰기 폴더> [--size 20]

@@ -1,6 +1,6 @@
 """layer_g4c — v1.2 K2 판 c 층 train-g4-c · train-g4-c-h (근접 c 후보 뽑기 → 판정 → 조립).
 
-설계 `../Docs/Design/2026-10-14-v1.2-K2-한국어c보강판설계.md` 4-1 · 4-2 · 4-4 · 5절 ④. 쌍 본문은 화면에 찍지 않는다.
+비공개 설계 4-1 · 4-2 · 4-4 · 5절 ④. 쌍 본문은 화면에 찍지 않는다.
 
     python -I layer_g4c.py pick  --g4 ~/.judgemodel/build/g4 [--old-root ~/.judgemodel] [--pool boolq=<jsonl> …] [--force]
     → <g4>/train-g4-c/pick.jsonl · pick-summary.json   (label_batches.py make --mode train 에 넣는다)

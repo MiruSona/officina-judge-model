@@ -1,4 +1,5 @@
 """기록 대리 서버 — mem 이 보내는 /judge 를 두 모델에 다 묻고 기록 jsonl 에 덧붙인다 (설계 3-1).
+선택 기능 — 사설 메모 저장소용. 예시 경로는 자기 환경에 맞춘다.
 mem 에는 reply 모델의 답을 바이트 그대로 돌려준다. queries.jsonl 의 frozen_at 뒤 · EXCLUDE 밖 줄만 「학습 풀」 후보다.
 """
 import json

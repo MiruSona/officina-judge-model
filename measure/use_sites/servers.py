@@ -1,4 +1,5 @@
 """doctor · serve · stop · proxy — 측정 전 점검과 둘째 모델 띄우기 (설계 5절 · 7절). serve 는 pid 를 servers.json 에 적는다.
+선택 기능 — 사설 메모 저장소용. 예시 경로는 자기 환경에 맞춘다.
 stop 은 servers.json 에 적힌(이 도구가 띄운) 서버만, 그 포트의 /health 이름이 기록과 같을 때 내린다 — 8092 상시 서버는 안 건드린다.
 """
 import ctypes
@@ -45,11 +46,11 @@ def free_memory_gb():
 
 
 def serving_python(given=""):
-    """서빙 venv python — 인자 → JudgeModel/venv-serve → ~/.laya-local/venv-serve. 시스템 python 엔 numpy 가 없다."""
+    """서빙 venv python — 인자 → JudgeModel/venv-serve. 시스템 python 엔 numpy 가 없을 수 있다."""
     if given:
         return given
     tail = os.path.join("Scripts", "python.exe") if sys.platform == "win32" else os.path.join("bin", "python")
-    for base in (os.path.join(common.ROOT, "venv-serve"), os.path.join(os.path.expanduser("~"), ".laya-local", "venv-serve")):
+    for base in (os.path.join(common.ROOT, "venv-serve"),):
         path = os.path.join(base, tail)
         if os.path.isfile(path):
             return path
@@ -110,7 +111,7 @@ def print_doctor(env, a):
         if v100["state"] != "안 닿음":
             port = "8095"
             print("  · 그 포트를 다른 모델이 쓰고 있다 — 다른 포트로 띄우고 --models v100=http://127.0.0.1:8095 로 준다")
-        model = os.path.join("~", ".judgemodel", "models", "nli-studio-v2")
+        model = os.environ.get("JUDGEMODEL_MODEL_DIR") or "<v1.0.0 모델 폴더>"
         print(f"  v1.0.0 띄우기 (약 3GB) : python -I {os.path.join('measure', 'use_eval.py')} serve --model {model} --port {port}")
         print(f"  끝나면 : python -I {os.path.join('measure', 'use_eval.py')} stop --port {port}")
     free = env["free_memory_gb"]

@@ -1,6 +1,6 @@
 """rulers — 학습 전 자 ① 주장만 보는 모델 · ③ 다양성 · ② 출처 판별기(진단만).
 
-설계 `../Docs/Design/2026-10-11-d자료층재구축설계.md` 3-4. 패키지 없이 순수 파이썬으로 짰다(글자 n묶음 + 로지스틱 회귀).
+비공개 설계 3-4. 패키지 없이 순수 파이썬으로 짰다(글자 n묶음 + 로지스틱 회귀).
 쌍 파일 줄은 `evidence` · `claim` · 칸(`--label-key`, 기본 `want`, 없으면 `label` · `hint`) · `group` 을 읽는다.
 
     python -I rulers.py claim-only --synth <Ⅱ 라벨 쌍.jsonl> --real <dev-cmp.jsonl>

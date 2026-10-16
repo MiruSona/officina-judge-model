@@ -1,4 +1,5 @@
 """sample — 자리 ①~③ 표본 뽑기 (설계 3절 · 11-1 줄인 판). 대리 서버 → mem review 판 → ② 기록 · ③ merge 짝 · ① 다시 짓기 → cands.jsonl.
+선택 기능 — 사설 메모 저장소용. 예시 경로는 자기 환경에 맞춘다.
 모든 쌍 줄에 두 모델 답(answers)을 함께 둔다 — report 는 이 파일과 라벨만 본다.
 """
 import json

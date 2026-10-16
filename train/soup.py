@@ -1,6 +1,6 @@
 """가중치 평균 (model soup) — 같은 구조 검사점 n 개의 가중치를 단순 평균해 새 검사점 폴더로 저장한다.
 
-사용 (미니PC, 컨테이너 안) :
+사용 (학습 기계, 컨테이너 안) :
     run/podman-train.sh --name soup-a train/soup.py --out runs/soup-a runs/r2-02/ckpt-best runs/r2-06/ckpt-e4
 
 - 입력 폴더마다 model.safetensors 를 읽는다. 키 집합 · 모양이 하나라도 다르면 멈춘다.

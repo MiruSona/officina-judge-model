@@ -1,14 +1,15 @@
 """mine_archive — 우리 아카이브(git · 문서 · mem)에서 열쇠 묶음과 후보 쌍을 뽑는다 (설계 d자료층재구축 4-1 · 4-2).
+선택 기능 — 사설 메모 저장소용. 예시 경로는 자기 환경에 맞춘다.
 
 하위 명령 셋 : git · docs · mem. 후보 줄 꼴은 mine_public 과 같다(`want` 비움 · `hint` 는 라벨 아님).
 쓰는 것 : <out>/archive/git · <out>/archive/docs · <out>/mem 아래 candidates.jsonl · groups.json.
 쓰기 전에 모든 줄을 scrub 규칙으로 거른다. 저장소 · 기억 원본은 읽기만 한다.
 
-    python -I mine_archive.py git  --repo studio=<저장소> --out <build>/g1 --names <목록> --game-names <목록>
-    python -I mine_archive.py docs --root studio=<저장소> --out <build>/g1 --names … --game-names …
-    python -I mine_archive.py mem  --store studio=<Memory/store> --dev-r2 <dev-r2.jsonl> --old-root ~/.judgemodel --out <build>/g1
-    python -I mine_archive.py revision  --repo studio=<저장소> … --out <build>/g2 --names … --game-names …   # v1.2 B 판
-    python -I mine_archive.py supersede --store studio=<Memory/store> … --old-root ~/.judgemodel --forbid <파일> … --out <build>/g2
+    python -I mine_archive.py git  --repo <repo-a>=<저장소> --out <build>/g1 --names <목록> --game-names <목록>
+    python -I mine_archive.py docs --root <repo-a>=<저장소> --out <build>/g1 --names … --game-names …
+    python -I mine_archive.py mem  --store <repo-a>=<store> --dev-r2 <dev-r2.jsonl> --old-root ~/.judgemodel --out <build>/g1
+    python -I mine_archive.py revision  --repo <repo-a>=<저장소> … --out <build>/g2 --names … --game-names …   # v1.2 B 판
+    python -I mine_archive.py supersede --store <repo-a>=<store> … --old-root ~/.judgemodel --forbid <파일> … --out <build>/g2
 """
 import argparse
 import collections
@@ -459,7 +460,7 @@ def _doc_cross(col, docs, by_name, rng):
 # ---------------------------------------------------------------- mem
 
 def read_mem_store(store_path, label):
-    """Memory/store → {id: {title, summary, scope, sources, superseded_by, parts:[(부분, 문장)]}}."""
+    """<store> (기억 저장소 폴더) → {id: {title, summary, scope, sources, superseded_by, parts:[(부분, 문장)]}}."""
     mems = {}
     for path in sorted(glob.glob(os.path.join(store_path, "**", "*.md"), recursive=True)):
         text = mp.read_text(path).replace("\r\n", "\n")
@@ -782,7 +783,7 @@ def main(argv=None):
                         help="후보 뿌리 (<out>/archive/<git|docs> · <out>/mem · <out>/ko-revision · <out>/ko-supersede)")
     parser.add_argument("--repo", action="append", default=[], help="git · revision : 이름=저장소 경로 (여러 번)")
     parser.add_argument("--root", action="append", default=[], help="docs : 이름=저장소 뿌리 (여러 번)")
-    parser.add_argument("--store", action="append", default=[], help="mem · supersede : 이름=Memory/store 경로 (여러 번)")
+    parser.add_argument("--store", action="append", default=[], help="mem · supersede : 이름=<store> 기억 저장소 경로 (여러 번)")
     parser.add_argument("--forbid", nargs="*", default=[],
                         help="supersede : 기억 id 를 뽑아 뺄 파일 (g1 셋 · 잣대 기억 목록 등)")
     parser.add_argument("--dev-r2", help="mem : 다시 붙일 dev-r2 파일")

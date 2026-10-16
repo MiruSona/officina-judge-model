@@ -1,6 +1,6 @@
 # 기준선 K — g4 셋으로 다시 잼 (v1.2 K2 판 6단계 앞머리)
 
-설계 `../Docs/Design/2026-10-14-v1.2-K2-한국어c보강판설계.md` 6-1 · 7절 6a. 셋 수와 해시는 `sets-g4.md` 11 · 12 · 13절.
+비공개 설계 6-1 · 7절 6a. 셋 수와 해시는 `sets-g4.md` 11 · 12 · 13절.
 
 ## 결론
 
@@ -24,7 +24,7 @@
 | 전체 acc3 | 2,343 | — | 0.7786 [0.7619, 0.7949] | 0.0165 | 0.0119 | 0.0053 |
 
 - 「씨앗 평균 짝 반폭 어림」 = 씨앗 짝(1v1) 붓스트랩 반폭 평균 ÷ √5 (g3 기준선과 같은 칸). 판별 불가 문턱 .04 는 ko c 에 건다.
-- ko · en 의 b · c 줄은 `baseline.py` 가 낸다(⑤). ko · en d 줄은 같은 함수(`baseline.lang_b(…, "d_recall")`)를 한 번 더 부른 값이다 — 미니PC `runs/g4-K-base/lang-d.json`.
+- ko · en 의 b · c 줄은 `baseline.py` 가 낸다(⑤). ko · en d 줄은 같은 함수(`baseline.lang_b(…, "d_recall")`)를 한 번 더 부른 값이다 — 학습 기계 `runs/g4-K-base/lang-d.json`.
 - 언어별 표에서 빠진 언어 : mix 34쌍.
 
 ## 2. 칸별 재현 (씨앗별)
@@ -39,16 +39,16 @@
 | 평균 | 0.7786 | 0.6749 | 0.7867 | 0.7615 | 0.4858 |
 
 - 릴리스 pick(규약 `release_pick` = ko c 평균에 가장 가까운 판) : **s2** (0.758). K2 가 이긴 뒤에 쓰는 값이라 이번 판정에는 안 걸린다.
-- 씨앗별 거짓 지지 · 보류율 · 씨앗 짝 표 · 원천별 표는 미니PC `runs/g4-K-base/baseline.md`.
+- 씨앗별 거짓 지지 · 보류율 · 씨앗 짝 표 · 원천별 표는 학습 기계 `runs/g4-K-base/baseline.md`.
 
 ## 3. 어떻게 돌렸나
 
 | 자리 | 값 |
 | --- | --- |
-| 스크립트 | 미니PC `~/judgetool/logs/g4-K-base.sh` (`g3-B2-base.sh` 를 g4 로 줄임) |
+| 스크립트 | 학습 기계 `$JT_ROOT/logs/g4-K-base.sh` (`g3-B2-base.sh` 를 g4 로 줄임) |
 | 평가 | K-s1~s5 `ckpt-best` 를 dev-cmp-g4 로만 → `runs/g1-K-sN/g4/eval-dev-cmp-g4`. 인자 `--max-len 320 --device cuda --dtype fp32 --batch 64 --public-neutral cd --protocol src/measure/protocol-g4.json` |
 | calibration · 곁 자 | 같은 ckpt · 같은 셋(dev-cal-g3 · k48 · klue-dev · mnli)이라 다시 안 쟀다 — `g3/calibration.json` · `g3/eval-side.txt` 를 `g4/` 로 복사 |
 | 해시 | dev-cmp-g4 `fa2f81cb…` · dev-cal-g3 `7f9a2f1d…` (`freeze.py check` ok) · 규약 `a3572d2a…` |
-| 조건 | llama 내림 · 게임 서버 꺼짐 |
+| 조건 | llama 내림 · 다른 GPU 작업 꺼짐 |
 | 시간 | 12:11:16 → 12:14:31, **3분 15초** (씨앗 하나 약 33초, baseline 28초) |
 | 메모리 · 스왑 | 가용 59,264MB → 59,293~59,313MB · 스왑 80MB → 80MB (**+0**) |

@@ -1,6 +1,6 @@
 """rewrite_check — BoolQ · KLUE 물음 → 평서문 바꾸기(로컬 생성)의 입력 조각 · 거두기 · 기계 검사 (K 판 ③ · ⑤).
 
-설계 `../Docs/Design/2026-10-13-v1.2-한국어b보강판설계.md` 3-2 · 3-5. 본문은 git 밖(`~/.judgemodel/build/g3/`)에만 쓴다.
+비공개 설계 3-2 · 3-5. 본문은 git 밖(`~/.judgemodel/build/g3/`)에만 쓴다.
 
     python -I rewrite_check.py prep  --kind boolq --src <g3>/boolq/train.jsonl --work <g3>/boolq/work [--size 40] [--tag t]
     python -I rewrite_check.py merge --kind boolq --src <g3>/boolq/train.jsonl --out <합친 파일> <모델 출력 …>
@@ -242,10 +242,10 @@ def read_outputs(paths):
 # ---------------------------------------------------------------- 명령
 
 def _guard(path):
-    """본문 · 조각은 스튜디오 저장소 밖에만 쓴다."""
+    """본문 · 조각은 사설 저장소 A 밖에만 쓴다."""
     p = os.path.abspath(path)
     if os.path.commonpath([p, os.path.abspath(STUDIO)]) == os.path.abspath(STUDIO):
-        sys.exit(f"{path} 가 스튜디오 저장소 안이다 — 본문은 git 밖에 둔다")
+        sys.exit(f"{path} 가 사설 저장소 A 안이다 — 본문은 git 밖에 둔다")
 
 
 def cmd_prep(a):

@@ -1,6 +1,6 @@
 # g4 한국어 평가 몫 — 뽑기 · 판정 (v1.2 K2 판 흐름 3단계)
 
-설계 `../Docs/Design/2026-10-14-v1.2-K2-한국어c보강판설계.md` 1절 3단계 · 3-1 · 7절 4b. 원천 자리는 `../Docs/Research/2026-10-14-K2-새blind셋조사.md` 2-2.
+비공개 설계 1절 3단계 · 3-1 · 7절 4b. 원천 자리는 비공개 작업 기록(2-2절)에 있다.
 쌍 본문은 git 밖 `~/.judgemodel/build/g4/` 에만 있다. 여기에는 수 · 경로 · 명령만 적는다. 예약(`reserve-g4`)은 다음 단계 몫이다.
 
 **결론 (2026-10-14) :** 한국어 평가 몫 **410쌍**(위키 180 · BoolQ 100 · KLUE 130)을 새로 뽑아 v6 두 판(Opus)으로 판정했다. 첫 두 판 일치 **97.8%**(401/410), 갈린 9쌍은 셋째 판이 모두 정했다(버림 0). 확정 칸은 **b 300 · a 93 · d 17 · c 0**. reserve-g4 를 시험 자리(스크래치)에서 돌려 보니 ko b 목표(위키 110 · BoolQ 90 · KLUE 50)와 c 목표를 다 채웠고, 넘김 0 · 겹침 검사 0 이다.
@@ -117,19 +117,19 @@ python -I ~/.judgemodel/build/g4/prep/finalize_g4.py
 
 - 손 스크립트 둘(`pick_g4.py` · `finalize_g4.py`)과 요약(`pick-eval-g4.summary.json` · `finalize-g4.summary.json`)은 `~/.judgemodel/build/g4/prep/` 에 있다.
 
-## 5. 미니PC 동기화
+## 5. 학습 기계 동기화
 
-미니PC 학습 사본(`~/judgetool/src/`)이 저장소 판과 어긋나 두 번 멈췄다(10-13 compare · 10-14 gates). 그래서 미니PC 일(6단계)을 시작하기 전에 **네 폴더(`measure` · `build` · `train` · `tests`)를 통째로 sha 대조**한다.
+학습 기계의 사본(`<작업 뿌리>/src/`)이 저장소 판과 어긋나 두 번 멈췄다(10-13 compare · 10-14 gates). 그래서 학습 기계 일(6단계)을 시작하기 전에 **네 폴더(`measure` · `build` · `train` · `tests`)를 통째로 sha 대조**한다.
 
-- 10-14 맞춤 : 작업 트리 판(미커밋 포함) 107 파일을 복사 → 다른 파일 0 · 미니PC 에만 있는 파일 0. 미니PC 시험 588 통과 · skip 35 (메인 PC 32 보다 셋 많음 — 메인 PC 에만 있는 옛 r2 판 pred · calibration 이 없어서다).
-- 미니PC 접속 별칭·계정은 `../../Docs/Guide/미니PC.local.md` 를 본다. 아래 `<미니PC>` 자리에 그 별칭을 넣는다.
+- 10-14 맞춤 : 작업 트리 판(미커밋 포함) 107 파일을 복사 → 다른 파일 0 · 학습 기계 에만 있는 파일 0. 학습 기계 시험 588 통과 · skip 35 (작업 PC 32 보다 셋 많음 — 작업 PC 에만 있는 옛 r2 판 pred · calibration 이 없어서다).
+- 아래 `<학습 기계>` 자리에 그 기계의 ssh 별칭을, `<작업 뿌리>` 에 학습 작업 폴더(`JT_ROOT`)를 넣는다.
 - 저장소 뿌리에서 Git Bash 로 돌린다. 끝에 `같음` 이 찍혀야 통과다. 줄이 나오면 그 파일을 다시 복사한다.
 
 ```bash
-diff <(git ls-files -co --exclude-standard -z measure build train tests | LC_ALL=C sort -z | xargs -0 sha256sum | sed 's/ \*/  /') <(ssh <미니PC> "cd ~/judgetool/src && find measure build train tests -type f -not -path '*/__pycache__/*' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum") && echo 같음
+diff <(git ls-files -co --exclude-standard -z measure build train tests | LC_ALL=C sort -z | xargs -0 sha256sum | sed 's/ \*/  /') <(ssh <학습 기계> "cd <작업 뿌리>/src && find measure build train tests -type f -not -path '*/__pycache__/*' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum") && echo 같음
 ```
 
-- 복사는 `git ls-files -co --exclude-standard -z measure build train tests > <목록>` 뒤 `tar -cf - --null -T <목록> | ssh <미니PC> "cd ~/judgetool/src && tar -xf -"` 로 한다. 쌍 · 셋 · 모델은 gitignore 라 목록에 안 들어간다.
+- 복사는 `git ls-files -co --exclude-standard -z measure build train tests > <목록>` 뒤 `tar -cf - --null -T <목록> | ssh <학습 기계> "cd <작업 뿌리>/src && tar -xf -"` 로 한다. 쌍 · 셋 · 모델은 gitignore 라 목록에 안 들어간다.
 - 이 파일(`sets-g4.md`)도 네 폴더 안이라, 고치면 다시 복사해야 대조가 맞는다.
 
 ## 6. blind-g4 예약 (`reserve-g4`, 2026-10-14)
@@ -336,7 +336,7 @@ python -I assemble_g4.py check --dest ~/.judgemodel/sets/g4-draft --draft
 
 ### 10-4. 진단 확인 (4-5)
 
-train-g4-c near-x c 에서 원천별 무작위 50(씨앗 20261445, 합 150)을 **K = `nli-studio-v6`(run_id g1-K-s5, ONNX sha256 597c80d1… 대조함)** 로 메인 PC 에서 ONNX 그대로 쟀다(`serve.OnnxNLI`, 서빙 venv, 25초). 8092 서버(v4)는 안 썼다. 재현은 4칸 argmax 가 c 인 몫이다. 라벨은 판정 뒤 확정 c. 설계 4-5 는 K-s1~5 다섯 판이지만 이번엔 출시 후보로 내보낸 s5 한 판만 쟀다(다섯 ckpt 는 미니PC 에만 있다).
+train-g4-c near-x c 에서 원천별 무작위 50(씨앗 20261445, 합 150)을 **K = `nli-studio-v6`(run_id g1-K-s5, ONNX sha256 597c80d1… 대조함)** 로 작업 PC 에서 ONNX 그대로 쟀다(`serve.OnnxNLI`, 서빙 venv, 25초). 8092 서버(v4)는 안 썼다. 재현은 4칸 argmax 가 c 인 몫이다. 라벨은 판정 뒤 확정 c. 설계 4-5 는 K-s1~5 다섯 판이지만 이번엔 출시 후보로 내보낸 s5 한 판만 쟀다(다섯 ckpt 는 학습 기계 에만 있다).
 
 | 원천 | 쌍 | **c 재현** | 예측 a · b · c · d |
 | --- | --- | --- | --- |
@@ -474,17 +474,17 @@ python -I ../train/freeze.py write --pairs ~/.judgemodel/sets/g4/train-g4-c-h.js
 python -I assemble_g4.py protocol --draft ../measure/protocol-g4.draft.json --out ../measure/protocol-g4.json
 ```
 
-## 13. 미니PC 6단계 머리 검사 · 기준선 (2026-10-14)
+## 13. 학습 기계 6단계 머리 검사 · 기준선 (2026-10-14)
 
-**결론 :** 미니PC 사본을 맞추고(다른 파일 0 · 시험 589 통과 · skip 35) 셋 셋을 옮겨 해시를 맞춘 뒤, 기준선 K 를 dev-cmp-g4 로 다시 쟀다. **ko c 짝 반폭 0.0115 ≤ .04 → 판별 가능.** 이어 K2 학습 다섯을 떼어 띄웠다. 표는 `baseline-g4.md`.
+**결론 :** 학습 기계 사본을 맞추고(다른 파일 0 · 시험 589 통과 · skip 35) 셋 셋을 옮겨 해시를 맞춘 뒤, 기준선 K 를 dev-cmp-g4 로 다시 쟀다. **ko c 짝 반폭 0.0115 ≤ .04 → 판별 가능.** 이어 K2 학습 다섯을 떼어 띄웠다. 표는 `baseline-g4.md`.
 
 | 검사 | 결과 |
 | --- | --- |
 | 사본 대조(5절 명령) | 처음엔 4줄 다름(`build/layer_g4c.py` · `measure/sets-g4.md` · `tests/test_layer_g4c.py` · `measure/protocol-g4.json` 없음) → 5절 tar 로 복사 → `같음` |
-| 미니PC 시험 | `python3 -I -m unittest discover -s tests` — 589 OK · skip 35 (pytest 는 미니PC 에 없다) |
+| 학습 기계 시험 | `python3 -I -m unittest discover -s tests` — 589 OK · skip 35 (pytest 는 학습 기계에 없다) |
 | 셋 | `mem/g4/` 에 dev-cmp-g4 · train-g4-c · train-g4-c-h + FROZEN 셋 복사 → `freeze.py check` ok. dev-cal-g3 · train-g3-ko 는 그대로 ok. **blind-g4 는 복사 안 함**(7단계 몫) |
 | 해시 | dev-cmp-g4 `fa2f81cb…` · train-g4-c `271546a1…` · train-g4-c-h `191bfb2d…` · dev-cal-g3 `7f9a2f1d…` · train-g3-ko `4a1025aa…` · 규약 `a3572d2a…` |
-| llama · 게임 서버 | `inactive` · 꺼짐 |
+| llama · 다른 GPU 작업 | `inactive` · 꺼짐 |
 | 메모리 · 디스크 | 가용 59GB · 스왑 80MB · 디스크 여유 399GB (K2 다섯 ckpt 약 45GB) |
 | K-s1~s5 ckpt | `runs/g1-K-s{1..5}/ckpt-best` 있음 → K 재학습 안 함 |
 
@@ -495,17 +495,17 @@ python -I assemble_g4.py protocol --draft ../measure/protocol-g4.draft.json --ou
 | ko d (278) | 0.4899 [0.4290, 0.5458] | 0.0198 |
 | 전체 c · b · d · acc3 | 0.7615 · 0.7867 · 0.4858 · 0.7786 | — · 0.0114 · 0.0163 · 0.0053 |
 
-- K2 학습 : 미니PC `logs/g4-K2.sh` (= `g3-K.sh` 의 K 처방 + `--train mem/g4/train-g4-c.jsonl`, 씨앗 1..5 순차 → 다섯 다 `runs/g1-K2-sN/g4/` 에 dev-cal-g3 · dev-cmp-g4 · 잣대 · 곁 자 평가). 짝 비교는 안 한다. 표식 `runs/k2/DONE` · `runs/k2/FAILED`, 씨앗별 로그 `runs/k2/g1-K2-sN.log`. 걸음 2,828 (설계 어림 2,830).
+- K2 학습 : 학습 기계 `logs/g4-K2.sh` (= `g3-K.sh` 의 K 처방 + `--train mem/g4/train-g4-c.jsonl`, 씨앗 1..5 순차 → 다섯 다 `runs/g1-K2-sN/g4/` 에 dev-cal-g3 · dev-cmp-g4 · 잣대 · 곁 자 평가). 짝 비교는 안 한다. 표식 `runs/k2/DONE` · `runs/k2/FAILED`, 씨앗별 로그 `runs/k2/g1-K2-sN.log`. 걸음 2,828 (설계 어림 2,830).
 
 ```bash
-# 미니PC (~/judgetool)
+# 학습 기계 (작업 뿌리 JT_ROOT)
 logs/g4-K-base.sh                                   # 기준선 — runs/g4-K-base/baseline.{json,md}
 nohup setsid logs/g4-K2.sh > runs/k2/k2.out 2>&1 < /dev/null &   # K2 다섯
 ```
 
 ## 14. 짝 비교 K → K2 (2026-10-14)
 
-- **지킴 깨짐** — 목표 ko c +.117 [+.089, +.149] 는 넘었으나 지킴 b_recall@en · b_recall · d_recall 셋이 깨졌다(ko b 는 지킴). 표 · 명령은 `../Docs/Research/2026-10-14-v1.2-K2판짝비교.md`.
+- **지킴 깨짐** — 목표 ko c +.117 [+.089, +.149] 는 넘었으나 지킴 b_recall@en · b_recall · d_recall 셋이 깨졌다(ko b 는 지킴). 표 · 명령은 비공개 작업 기록에 있다.
 
 ## 15. K2-h 학습 시작 (설계 6-3, 2026-10-14)
 
@@ -513,15 +513,15 @@ nohup setsid logs/g4-K2.sh > runs/k2/k2.out 2>&1 < /dev/null &   # K2 다섯
 
 | 항목 | 값 |
 | --- | --- |
-| 스크립트 | 미니PC `logs/g4-K2h.sh` (`g4-K2.sh` 를 sed 로 옮김 — 다른 줄은 c 층 파일 · 판 이름 `g1-K2h-sN` · 표식 자리 `runs/k2h/` · stage 파일뿐) |
-| 머리 검사 | llama inactive · 게임 서버 꺼짐 · jt- 컨테이너 없음 · 가용 59GB · 스왑 80MB · 디스크 여유 357GB |
+| 스크립트 | 학습 기계 `logs/g4-K2h.sh` (`g4-K2.sh` 를 sed 로 옮김 — 다른 줄은 c 층 파일 · 판 이름 `g1-K2h-sN` · 표식 자리 `runs/k2h/` · stage 파일뿐) |
+| 머리 검사 | llama inactive · 다른 GPU 작업 꺼짐 · jt- 컨테이너 없음 · 가용 59GB · 스왑 80MB · 디스크 여유 357GB |
 | 시작 | 14:25:31 · 걸음 2,780 (설계 어림 2,780) · 첫 판 200걸음에서 가용 43GB · GTT 14.5GB · 스왑 +0 |
 | 표식 | `runs/k2h/DONE` · `runs/k2h/FAILED` · 씨앗별 로그 `runs/k2h/g1-K2h-sN.log` · 전체 `runs/k2h/k2h.out` |
 | K2 실측 (눈금) | 학습 판당 약 22분 · 평가 판당 2분 15초 · 합 2시간 2분 (12:14:51 → 14:17:02) |
 | 예상 끝 | 약 16:25 |
 
 ```bash
-# 미니PC (~/judgetool)
+# 학습 기계 (작업 뿌리 JT_ROOT)
 nohup setsid logs/g4-K2h.sh > runs/k2h/k2h.out 2>&1 < /dev/null &
 ```
 
@@ -680,22 +680,22 @@ python -I ../train/freeze.py check --pairs ~/.judgemodel/sets/g4/<이름>.jsonl 
 python -I assemble_g4.py protocol --draft ../measure/protocol-g5.draft.json --out ../measure/protocol-g5.json
 ```
 
-## 20. 미니PC 동기화 — K3 (K3 설계 1절 5단계, 2026-10-14)
+## 20. 학습 기계 동기화 — K3 (K3 설계 1절 5단계, 2026-10-14)
 
-**결론 :** 미니PC 사본을 다시 맞췄다(다른 파일 0 · 시험 623 OK · skip 35). train-g4-d 를 `mem/g4/` 로 옮겨 `freeze.py check` 여섯이 다 ok 다. blind-g4 는 여전히 안 옮겼다(7단계 몫).
+**결론 :** 학습 기계 사본을 다시 맞췄다(다른 파일 0 · 시험 623 OK · skip 35). train-g4-d 를 `mem/g4/` 로 옮겨 `freeze.py check` 여섯이 다 ok 다. blind-g4 는 여전히 안 옮겼다(7단계 몫).
 
 | 검사 | 결과 |
 | --- | --- |
 | 사본 대조(5절 명령) | 처음 14파일 다름 — 새 파일 `build/layer_g4d.py` · `measure/protocol-g5{,.draft}.json` · `tests/test_layer_g4d.py`, 바뀐 파일 `build/{README.md,assemble_g4.py}` · `measure/{README.md,prereg.py,sets-g4.md}` · `tests/{test_assemble_g4,test_compare,test_four_labels}.py` → 5절 tar 로 복사 → `같음` |
-| 미니PC 시험 | `python3 -I -m unittest discover -s tests` — 623 OK · skip 35 |
+| 학습 기계 시험 | `python3 -I -m unittest discover -s tests` — 623 OK · skip 35 |
 | 셋 | `mem/g4/train-g4-d.jsonl` + FROZEN 복사 · sha `739072b9…` · `freeze.py check` ok : dev-cmp-g4 · train-g4-c · train-g4-c-h · train-g4-d · dev-cal-g3 · train-g3-ko |
 | 규약 | `src/measure/protocol-g5.json` `6422e1e2…` (19-3 과 같음) |
-| llama · 게임 서버 · 컨테이너 | inactive · 꺼짐 · jt- 없음 |
+| llama · 다른 GPU 작업 · 컨테이너 | inactive · 꺼짐 · jt- 없음 |
 | 메모리 · 디스크 | 가용 59GB · 스왑 80MB · 디스크 여유 315GB (K2-h 판 하나 8.4GB) |
 
 ## 21. K3 진단 확인 · 학습 시작 (K3 설계 6-1 · 6-2, 2026-10-14)
 
-**결론 :** 진단 확인에서 K2-s1 의 d 재현이 **.167**(멈춤 문턱 .70 아래)이라 d 층이 무너진 꼴을 맞게 겨눴다. c 파일은 K2-h 짝 비교 ⑧ 대로 **train-g4-c-h** 로 정해(`../Docs/Research/2026-10-14-v1.2-K2h판짝비교.md` 2절) K3 다섯을 띄웠다. 규약 protocol-g5 는 안 고쳤다.
+**결론 :** 진단 확인에서 K2-s1 의 d 재현이 **.167**(멈춤 문턱 .70 아래)이라 d 층이 무너진 꼴을 맞게 겨눴다. c 파일은 K2-h 짝 비교 ⑧ 대로 **train-g4-c-h** 로 정해(비공개 작업 기록 2절) K3 다섯을 띄웠다. 규약 protocol-g5 는 안 고쳤다.
 
 ### 21-1. 진단 확인 (train-g4-d 꼴 다섯 × 무작위 30, 씨앗 20261471, 층에서 안 뺌)
 
@@ -709,27 +709,27 @@ python -I assemble_g4.py protocol --draft ../measure/protocol-g5.draft.json --ou
 | **합** | **150** | **.593** | .213 | **.167** | **.713** | .013 · .107 |
 
 - 기대(K .4~.6 · K2 < .5)와 맞다. K2 가 잃은 d 는 거의 다 c 로 갔다(c 몫 .21 → .71).
-- 자리 : 미니PC `runs/g4-K3-diag/` (diag150.jsonl sha `101500e6…` · `eval-{K,K2}-s1/` · diag.md · diag_tab.py). 평가 인자는 dev-cmp 평가와 같고 `--protocol src/measure/protocol-g5.json`.
+- 자리 : 학습 기계 `runs/g4-K3-diag/` (diag150.jsonl sha `101500e6…` · `eval-{K,K2}-s1/` · diag.md · diag_tab.py). 평가 인자는 dev-cmp 평가와 같고 `--protocol src/measure/protocol-g5.json`.
 
 ### 21-2. K3 학습
 
 | 항목 | 값 |
 | --- | --- |
-| 스크립트 | 미니PC `logs/g4-K3.sh` (`g4-K2h.sh` 를 sed 로 옮김 — 더한 것은 `--train mem/g4/train-g4-d.jsonl` · 규약 `protocol-g5.json`(sha 박음) · 머리 검사 파일 · freeze 줄에 train-g4-d, 그 밖은 판 이름 `g1-K3-sN` · 표식 자리 `runs/k3/` · stage 파일) |
+| 스크립트 | 학습 기계 `logs/g4-K3.sh` (`g4-K2h.sh` 를 sed 로 옮김 — 더한 것은 `--train mem/g4/train-g4-d.jsonl` · 규약 `protocol-g5.json`(sha 박음) · 머리 검사 파일 · freeze 줄에 train-g4-d, 그 밖은 판 이름 `g1-K3-sN` · 표식 자리 `runs/k3/` · stage 파일) |
 | `--train` | train-r2 · train-g1-arch · train-g3-ko · **train-g4-c-h** · **train-g4-d** (+ replay 같음) |
-| 머리 검사 | llama inactive · 게임 서버 꺼짐 · 가용 59GB · 스왑 80MB · freeze 여섯 ok |
+| 머리 검사 | llama inactive · 다른 GPU 작업 꺼짐 · 가용 59GB · 스왑 80MB · freeze 여섯 ok |
 | 시작 | 16:33:08 · 걸음 **2,968** (설계 어림 3,015 는 c 파일 train-g4-c 기준. c-h 라 200쌍 적음) · 200걸음에서 가용 43GB · GTT 14.2GB · 스왑 +0 |
 | 표식 | `runs/k3/DONE` · `runs/k3/FAILED` · 씨앗별 로그 `runs/k3/g1-K3-sN.log` · 전체 `runs/k3/k3.out` |
 | 예상 끝 | 약 18:40 (K2-h 실측 2시간 × 걸음 1.07) |
 
 ```bash
-# 미니PC (~/judgetool)
+# 학습 기계 (작업 뿌리 JT_ROOT)
 nohup setsid logs/g4-K3.sh > runs/k3/k3.out 2>&1 < /dev/null &
 ```
 
 ## 22. 짝 비교 K → K3 (K3 설계 9절, 2026-10-14)
 
-**결론 :** **지킴 깨짐 → 접음.** 목표 `c_recall@ko` +.119 [+.091, +.150] 는 넘었고 d 는 +.208 로 되살아났지만, en b −.209 · 전체 b −.112 · ko b −.022(아래끝 −.042)가 깨졌다. v1.2 멈춤 · 8092 v1.1.0 유지 · prereg · blind-g4 안 함. 경보 여섯은 모두 조용. 결과 문서 `../Docs/Research/2026-10-14-v1.2-K3판짝비교.md`.
+**결론 :** **지킴 깨짐 → 접음.** 목표 `c_recall@ko` +.119 [+.091, +.150] 는 넘었고 d 는 +.208 로 되살아났지만, en b −.209 · 전체 b −.112 · ko b −.022(아래끝 −.042)가 깨졌다. v1.2 멈춤 · 8092 v1.1.0 유지 · prereg · blind-g4 안 함. 경보 여섯은 모두 조용. 결과 문서는 공개하지 않는다.
 
 | 항목 | 값 |
 | --- | --- |
@@ -739,10 +739,10 @@ nohup setsid logs/g4-K3.sh > runs/k3/k3.out 2>&1 < /dev/null &
 | 다시 찍기 | `runs/g4-K3-eval/restamp/g1-{K,K2}-sN/g4/` — pred · calibration · eval-side 는 원본 링크, summary 의 protocol_sha256 만 g5 로(옛 값 · 까닭 칸 덧붙임). 원본 · src 안 건드림 · GPU 안 씀 |
 | 맞춤 확인 | 다시 찍은 K → K2 (`sanity-K-K2`) 가 14절 · K2 문서 숫자와 같음 |
 | 출력 sha | compare.json `8642052a695465b29795688d1265a9619eb82e1b98b4bb5b8f99cdf99e789c3b` · compare.md `46866d3d…` · compare-K2.json `44773f8af372c6285db0c7b17fedf2d226fcd246bbb3d8fcad61b74fe0c824f4` · compare-K2.md `687113ab…` · sanity-K-K2.json `fd1a3db6…` |
-| 자리 | 미니PC `runs/g4-K3-eval/` · 메인 PC `~/.judgemodel/runs/g4-K3/eval/` |
+| 자리 | 학습 기계 `runs/g4-K3-eval/` · 작업 PC `~/.judgemodel/runs/g4-K3/eval/` |
 
 ```bash
-# 미니PC (~/judgetool), R=runs/g4-K3-eval/restamp
+# 학습 기계 (작업 뿌리 JT_ROOT), R=runs/g4-K3-eval/restamp
 python3 -I src/measure/compare.py --protocol src/measure/protocol-g5.json --set mem/g4/dev-cmp-g4.jsonl \
   --base K=$R/g1-K-s1/g4/eval-dev-cmp-g4,…(s5) --new K3=runs/g1-K3-s1/g4/eval-dev-cmp-g4,…(s5) \
   --by domain,lang --out runs/g4-K3-eval/compare.json --md runs/g4-K3-eval/compare.md
@@ -824,4 +824,4 @@ python -I assemble_g4.py protocol --draft ../measure/protocol-g6.draft.json --ou
 - 경로는 Git Bash 에서 `C:/…` 꼴로 준다 — `~/…@~/…` 꼴은 `@` 뒤가 안 풀려 「없는 파일」로 멈춘다.
 - 나3 은 `train-g4-d-re` 를 `train-g4-d` 보다 앞에 둔다 — 같은 id 는 앞 것이 남아(`same_id_earlier`) VitaminC 다시 판정 줄이 쓰인다.
 
-- **K4 결과(10-15)** : 짝 비교 K → K4 지킴 깨짐(b_recall@ko −.019 [−.0394, 0]) → 접음 · 8092 v1.1.0 유지. `../Docs/Research/2026-10-15-v1.2-K4판짝비교.md`.
+- **K4 결과(10-15)** : 짝 비교 K → K4 지킴 깨짐(b_recall@ko −.019 [−.0394, 0]) → 접음 · 8092 v1.1.0 유지 (결과 문서는 공개하지 않는다).

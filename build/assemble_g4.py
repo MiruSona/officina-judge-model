@@ -1,6 +1,6 @@
 """assemble_g4 — v1.2 K2 판 g4 평가 셋 둘 조립 · 얼림 · 검사(min_groups) · 규약 해시 채우기.
 
-설계 `../Docs/Design/2026-10-14-v1.2-K2-한국어c보강판설계.md` 3-2 · 3-4 · 3-5 · 5절 ⑤. 쌍 본문은 화면에 찍지 않는다.
+비공개 설계 3-2 · 3-4 · 3-5 · 5절 ⑤. 쌍 본문은 화면에 찍지 않는다.
 
     python -I assemble_g4.py assemble --set dev-cmp-g4|blind-g4 [--dest ~/.judgemodel/sets/g4] [--draft] \
         [--build ~/.judgemodel/build/g4] [--g3-dir ~/.judgemodel/sets/g3] [--dirs <판정 폴더> …]

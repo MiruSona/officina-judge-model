@@ -29,7 +29,7 @@ CRITERIA = {
     "contradict_recall_min": 0.75,   # ② 모델 표
     "false_support_max": 3,          # ③ 사다리 표 · 확신 A 인데 정답 B·C
     "unsure_max": 0.30,              # ③ 사다리 표 · Unsure / 전체
-    "p95_ms_max": 1000.0,            # HTTP 포함 · 메인 PC
+    "p95_ms_max": 1000.0,            # HTTP 포함 · 서빙 기계
 }
 # 4칸 자 : 규약 release_gate 칸 → run_measure.verdict 가 읽는 criteria 칸. 값은 규약에서만 온다
 GATE_TO_CRITERIA = {
@@ -91,13 +91,13 @@ NEXT_BY_PROTOCOL = {"protocol-g2.json": NEXT_G2, "protocol-g3.json": NEXT_G3, "p
                     "protocol-g5.json": NEXT_G5, "protocol-g6.json": NEXT_G6,
                     "protocol-g7.json": NEXT_G7, "protocol-g8.json": NEXT_G8}
 NEXT_V2 = {
-    "pass": "nli-studio-v3 를 꽂는다 (응답 nli-v2) · 손님 판올림 · 진행상황 · mem history",
+    "pass": "nli-studio-v3 를 꽂는다 (응답 nli-v2) · 손님 판올림 · 작업 기록",
     "p95_only": "int8 → 그래도 넘으면 옛 서버(nli-studio-v2) 유지",
     "fail_old": "옛 일 자(정확도·반대·거짓 지지·보류) 미달 — 넷 칸을 꽂지 않는다 (설계 8절 ①)",
     "fail_related": "옛 일은 통과 · d 자만 미달 — --compat3 로 꽂아 옛 일만 쓰고 merge 2차는 양방향 지지만 (설계 8절 ②)",
 }
 NEXT = {
-    "pass": "nli_url 을 켠다 · mem history · 진행상황 · game90 은 개발용으로 내림 · 저장소 연결은 사용자에게 묻는다",
+    "pass": "nli_url 을 켠다 · 작업 기록 · game90 은 개발용으로 내림 · 저장소 연결은 사용자에게 묻는다",
     "p95_only": "int8 → 그래도 넘으면 klue/roberta-base 로 같은 길 (p95 는 라벨을 안 보므로 다시 재도 된다)",
     "fail": "길 1 을 접는다 · nli_url 을 비운다 · 수치를 mem history 로 · 다시 열려면 새 blind 셋을 먼저",
 }

@@ -1,6 +1,6 @@
 """mine_wiki — 한국어 위키백과 개정 이력 덤프(.bz2)에서 「한 문장 · 한 자리만 바뀐」 b · d 후보를 뽑는다.
 
-설계 `../Docs/Design/2026-10-13-v1.2-한국어b보강판설계.md` 3-1. 표준 라이브러리만 쓴다(8-2 ⑧).
+비공개 설계 3-1. 표준 라이브러리만 쓴다(8-2 ⑧).
 덤프는 디스크에 풀지 않고 bz2 + iterparse 로 흘려 읽는다. 줄 꼴은 mine_archive revision 과 같다.
 
     python -I mine_wiki.py pairs --dump <history.xml-….bz2> --out <chunk.jsonl> [--limit-pages N]

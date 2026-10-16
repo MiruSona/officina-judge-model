@@ -1,4 +1,5 @@
-"""④ 서브에이전트 보고 거두기 — harvest-reports · log-report (설계 `Docs/Design/2026-10-12-실사용측정설계.md` 4-1 덧붙임 2).
+"""④ 서브에이전트 보고 거두기 — harvest-reports · log-report (비공개 설계 4-1 덧붙임 2).
+선택 기능 — 사설 메모 저장소용. 예시 경로는 자기 환경에 맞춘다.
 보고 전문에서 결정 문장을 뽑아 같은 scope 기존 mem 결정과 짝 짓고 `use1/<별명>/collect/report-pairs.jsonl` 에 덧붙인다.
 """
 import datetime

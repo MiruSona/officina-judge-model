@@ -35,7 +35,7 @@ class SlotTest(unittest.TestCase):
         self.assertEqual(kinds("사용자가 0.65 이상이면 켬으로 둔다."),
                          [("who", "사용자"), ("num", "0.65"), ("bound", "이상"), ("onoff", "켬")])
         # 판 이름 · 절 번호 · 기억 id · 경로 속 날짜 · 옵션 뒤 수 · 네 자리 맨 수는 값 자리가 아니다
-        self.assertEqual(kinds("v1.2 의 3-2 절과 20261012-0c46b175 를 보고 sets/2026-10-10/ 에 -np 1 로 8092 를 띄웠다."), [])
+        self.assertEqual(kinds("v1.2 의 3-2 절과 20261012-abcd1234 를 보고 sets/2026-10-10/ 에 -np 1 로 8092 를 띄웠다."), [])
         self.assertEqual(kinds("19,880건은 15분쯤."), [("num", "19,880건"), ("num", "15분")])
 
     def test_new_value_same_kind_and_absent(self):
@@ -91,7 +91,7 @@ class ForbidTest(unittest.TestCase):
     def test_groups_forbid_and_reasons(self):
         self.assertEqual(sc.group_to_key("doc:studio:Docs/a.md"), ("doc", "Docs/a.md"))
         self.assertEqual(sc.group_to_key("doc:ArtTool:Docs/b.md"), ("doc", "ArtTool/Docs/b.md"))
-        self.assertEqual(sc.group_to_key('git:EffortTool:"Docs/\\352\\260\\200.md"'), ("doc", "EffortTool/Docs/가.md"))
+        self.assertEqual(sc.group_to_key('git:SampleTool:"Docs/\\352\\260\\200.md"'), ("doc", "SampleTool/Docs/가.md"))
         self.assertIsNone(sc.group_to_key("doc:game:Docs/c.md"))
         self.assertIsNone(sc.group_to_key("vitc:Apeshit"))
         with tempfile.TemporaryDirectory() as root:

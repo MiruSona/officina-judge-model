@@ -1,20 +1,22 @@
 #!/bin/bash
 # watch-lib.sh — 감싸개 둘(podman-train.sh · cpu-train.sh)이 같이 쓰는 감시 고리. source 로 읽는다 (설계 3-3).
 #
-# 기계별 값은 git 밖 "$JT_ROOT/env.sh" 에서 읽는다 (예: JUDGEMODEL_GAME_PROC=<게임 서버 실행 파일 이름>).
-# JUDGEMODEL_GAME_PROC 가 비면 게임 서버 검사(뜸 · 가용 < 10GB)를 건너뛴다. 스왑 · 심장 박동 검사는 늘 한다.
+# 기계별 값은 git 밖 "$JT_ROOT/env.sh" 에서 읽는다 (예: WATCH_PROC=<같은 기계에서 도는 다른 GPU 작업의 실행 파일 이름>).
+# WATCH_PROC 는 학습과 메모리를 나눠 쓰는 다른 프로세스다. 학습 중에 새로 뜨거나, 떠 있는 동안 가용 메모리가
+# 10GB 아래로 내려가면 학습을 멈춘다. 비면 이 검사를 건너뛴다. 스왑 · 심장 박동 검사는 늘 한다.
+# 옛 이름 JUDGEMODEL_GAME_PROC 로 준 값도 받는다.
 #
 # 멈추는 길 둘 :
-#   - 스왑 · 게임 서버 · 메모리 → 멈춤 파일에 까닭을 쓴다. 학습 스크립트가 검사점을 저장하고 스스로 끝낸다.
+#   - 스왑 · 다른 GPU 작업(WATCH_PROC) · 메모리 → 멈춤 파일에 까닭을 쓴다. 학습 스크립트가 검사점을 저장하고 스스로 끝낸다.
 #     GRACE_SEC 안에 안 끝나면 죽인다 (bench.py 처럼 멈춤 파일을 안 보는 스크립트도 이 길로 끝난다)
 #   - 심장 박동 끊김 → 바로 죽인다. 죽이기가 안 끝나면 GPU 멎음으로 보고 사람에게 알린다
 
-JT_ROOT="${JT_ROOT:-$HOME/judgetool}"
+JT_ROOT="${JT_ROOT:-$HOME/judgemodel-work}"   # 학습 기계의 작업 뿌리 (src · logs · runs · hf 가 이 아래)
 if [ -f "$JT_ROOT/env.sh" ]; then
   # shellcheck disable=SC1091
   . "$JT_ROOT/env.sh"
 fi
-JUDGEMODEL_GAME_PROC="${JUDGEMODEL_GAME_PROC:-}"
+WATCH_PROC="${WATCH_PROC:-${JUDGEMODEL_GAME_PROC:-}}"
 STALL_SEC="${JT_STALL_SEC:-60}"
 STARTUP_SEC="${JT_STARTUP_SEC:-180}"
 SWAP_MAX_MB="${JT_SWAP_MAX_MB:-256}"
@@ -32,10 +34,10 @@ mem_line() {  # 가용 · 스왑 · GTT (MiB)
 swap_mb() { free -m | awk '/^Swap/{print $3}'; }
 avail_mb() { free -m | awk '/^Mem/{print $7}'; }
 
-# 명령 줄 첫 낱말이 서버 실행 파일인 것만 센다 — 그 낱말을 품은 ssh 셸 줄은 안 센다 (N1 함정 4-4).
-game_up() {
-  [ -n "$JUDGEMODEL_GAME_PROC" ] || return 1
-  pgrep -f "^[^ ]*${JUDGEMODEL_GAME_PROC}" >/dev/null
+# 명령 줄 첫 낱말이 그 실행 파일인 것만 센다 — 그 낱말을 품은 ssh 셸 줄은 안 센다 (N1 함정 4-4).
+watch_proc_up() {
+  [ -n "$WATCH_PROC" ] || return 1
+  pgrep -f "^[^ ]*${WATCH_PROC}" >/dev/null
 }
 
 log_line() { echo "[$(date +%T)] $*" >> "$log"; }
@@ -43,8 +45,8 @@ log_line() { echo "[$(date +%T)] $*" >> "$log"; }
 # watch_init : 시작 값을 잡는다. log 가 정해진 뒤 부른다.
 watch_init() {
   swap0=$(swap_mb)
-  game0=0
-  if game_up; then game0=1; fi
+  proc0=0
+  if watch_proc_up; then proc0=1; fi
   stop_reason=""
 }
 
@@ -73,9 +75,9 @@ watch_loop() {
     reason=""
     swap_now=$(swap_mb)
     [ $(( swap_now - swap0 )) -gt "$SWAP_MAX_MB" ] && reason="swap (+$(( swap_now - swap0 ))MB)"
-    if [ -z "$reason" ] && game_up; then
-      if [ "$game0" = 0 ]; then
-        reason="gameserver"
+    if [ -z "$reason" ] && watch_proc_up; then
+      if [ "$proc0" = 0 ]; then
+        reason="watch_proc"
       elif [ "$(avail_mb)" -lt "$AVAIL_MIN_MB" ]; then
         reason="memory"
       fi
