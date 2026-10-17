@@ -14,3 +14,6 @@ venv*/
 *.gguf
 env.sh
 *.jsonl
+# private training data never goes here
+private/
+*.7z
