@@ -825,3 +825,7 @@ python -I assemble_g4.py protocol --draft ../measure/protocol-g6.draft.json --ou
 - 나3 은 `train-g4-d-re` 를 `train-g4-d` 보다 앞에 둔다 — 같은 id 는 앞 것이 남아(`same_id_earlier`) VitaminC 다시 판정 줄이 쓰인다.
 
 - **K4 결과(10-15)** : 짝 비교 K → K4 지킴 깨짐(b_recall@ko −.019 [−.0394, 0]) → 접음 · 8092 v1.1.0 유지 (결과 문서는 공개하지 않는다).
+
+## 24. 규약 protocol-g9 (2026-10-17)
+
+- 셋은 g4 그대로다(세 해시 g8 과 같음). 바뀐 것은 짝 비교 지킴(F1 · 씨앗 5 필수)뿐이라 이 문서에 새 셈은 없다. 자세한 건 `README.md` 8항 `protocol-g9.json`.

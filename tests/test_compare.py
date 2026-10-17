@@ -93,9 +93,9 @@ class Fixture:
             json.dump(protocol, f, ensure_ascii=False, indent=1)
         self.protocol_sha = cmp.sha256_file(self.protocol)
 
-    def runs(self, cond, fn, side=True, summary=None):
+    def runs(self, cond, fn, side=True, summary=None, seeds=(1, 2, 3)):
         paths = []
-        for seed in (1, 2, 3):
+        for seed in seeds:
             run_dir = os.path.join(self.tmp, "runs", f"g1-{cond}-s{seed}")
             eval_dir = os.path.join(run_dir, "eval-dev-cmp")
             os.makedirs(eval_dir, exist_ok=True)
@@ -112,10 +112,10 @@ class Fixture:
             paths.append(eval_dir)
         return f"{cond}=" + ",".join(paths)
 
-    def stats(self, base_fn, new_fn, side=True):
+    def stats(self, base_fn, new_fn, side=True, seeds=(1, 2, 3)):
         protocol, _ = cmp.read_protocol(self.protocol)
-        _, base = cmp.load_runs(self.runs("B0", base_fn, side))
-        _, new = cmp.load_runs(self.runs("B1", new_fn, side))
+        _, base = cmp.load_runs(self.runs("B0", base_fn, side, seeds=seeds))
+        _, new = cmp.load_runs(self.runs("B1", new_fn, side, seeds=seeds))
         return protocol, cmp.compare(protocol, cmp.read_set(self.set_path), base, new)
 
 

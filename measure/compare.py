@@ -34,6 +34,8 @@ METRICS = {
     "d_to_a": (RELATED, SUPPORT), "a_to_d": (SUPPORT, RELATED),
 }
 HIGHER_IS_BETTER = {"d_to_a": False, "a_to_d": False}
+# F1 자 (protocol-g9 부터) — 이름 → 칸 번호 (macro_f1 은 네 칸 F1 평균). 정밀이 섞여 선형이 아니라 METRICS 와 따로 센다
+F1_METRICS = {"a_f1": SUPPORT, "b_f1": CONTRA, "c_f1": UNRELATED, "d_f1": RELATED, "macro_f1": None}
 
 
 class Refuse(Exception):
@@ -339,6 +341,126 @@ def cluster_bootstrap(groups, base, new, metric, n=10000, ci=0.95, rng_seed=2026
             "low": round(percentile(diffs, tail), 4), "high": round(percentile(diffs, 1 - tail), 4)}
 
 
+def is_f1(metric):
+    return metric in F1_METRICS
+
+
+def f1_value(metric, gold, tp, pred, seeds):
+    """혼동표 셈 → F1. gold 는 정답 칸 쌍 수(씨앗 하나 기준), tp · pred 는 씨앗 합. 셀 수 없으면(분모 0) None."""
+    def one(k):
+        den = seeds * gold[k] + pred[k]
+        return 2 * tp[k] / den if den else None
+    if F1_METRICS[metric] is not None:
+        return one(F1_METRICS[metric])
+    cells = [one(k) for k in range(len(LETTERS))]
+    return None if any(v is None for v in cells) else sum(cells) / len(cells)
+
+
+def f1_bootstrap(groups, base, new, metrics, n=10000, ci=0.95, rng_seed=20261011):
+    """F1 자 여럿을 한 번에 — 묶음 다시 뽑기마다 혼동표(정답 × 예측, 씨앗 합)를 다시 세서 F1 을 새로 센다.
+
+    정밀이 모든 정답 칸에서 오므로 「그 조각에 쌍이 있는 묶음 전부」를 뽑는다 (재현 자는 그 칸 정답 묶음만 뽑는다).
+    정답이 a~d 가 아닌 쌍(공개 중립 CD)은 뺀다. 씨앗은 고정. 돌려줌 {지표: base · new · diff · low · high}.
+    """
+    width = len(LETTERS)
+    keys = sorted(set(g for g, label in zip(groups, base["gold"]) if label in range(width)))
+    index = {k: i for i, k in enumerate(keys)}
+    # 묶음마다 칸 20 — 정답 4 · base tp 4 · base pred 4 · new tp 4 · new pred 4
+    vec = [[0] * (5 * width) for _ in keys]
+    for g, label, cb, cn in zip(groups, base["gold"], base["counts"], new["counts"]):
+        if label not in range(width):
+            continue
+        v = vec[index[g]]
+        v[label] += 1
+        v[width + label] += cb[label]
+        v[3 * width + label] += cn[label]
+        for k in range(width):
+            v[2 * width + k] += cb[k]
+            v[4 * width + k] += cn[k]
+    total = [sum(col) for col in zip(*vec)] if vec else [0] * (5 * width)
+    pairs = sum(total[:width])
+    # 칸을 정수 하나에 묶어 더한다 (뽑기마다 합이 빠르다). 칸 폭은 「모든 묶음을 다 뽑아도」 넘지 않게
+    bits = (max(total + [1]) * max(len(keys), 1)).bit_length() + 1
+    mask = (1 << bits) - 1
+    packed = [sum(x << (bits * k) for k, x in enumerate(v)) for v in vec]
+
+    def split(x):
+        f = [(x >> (bits * k)) & mask for k in range(5 * width)]
+        return f[:width], f[width:2 * width], f[2 * width:3 * width], f[3 * width:4 * width], f[4 * width:]
+
+    def values(fields):
+        gold, tb, pb, tn, pn = fields
+        return {m: (f1_value(m, gold, tb, pb, base["seeds"]), f1_value(m, gold, tn, pn, new["seeds"])) for m in metrics}
+
+    out = {}
+    point = values(split(sum(packed))) if packed else {m: (None, None) for m in metrics}
+    for m in metrics:
+        out[m] = {"metric": m, "pairs": pairs, "groups": len(keys), "base": None, "new": None, "diff": None,
+                  "low": None, "high": None, "mcnemar": None}
+    if pairs == 0:
+        return out
+    diffs = {m: [] for m in metrics}
+    rng = random.Random(rng_seed)
+    picks = range(len(keys))
+    for _ in range(n):
+        idx = rng.choices(picks, k=len(keys))
+        for m, (vb, vn) in values(split(sum(map(packed.__getitem__, idx)))).items():
+            if vb is not None and vn is not None:
+                diffs[m].append(vn - vb)
+    tail = (1 - ci) / 2
+    for m in metrics:
+        vb, vn = point[m]
+        d = sorted(diffs[m])
+        out[m].update({"base": None if vb is None else round(vb, 4), "new": None if vn is None else round(vn, 4),
+                       "diff": None if vb is None or vn is None else round(vn - vb, 4)})
+        if d:
+            out[m].update({"low": round(percentile(d, tail), 4), "high": round(percentile(d, 1 - tail), 4)})
+    return out
+
+
+def f1_compare(protocol, set_rows, base, new, specs):
+    """F1 자 목록 → {자 이름: 셈}. 거름(lang · domain)이 같은 자끼리 한 번 뽑아 같이 센다 (조각마다 rng 새로).
+
+    걸러진 쌍이 0 이면 Refuse (slice_compare 와 같다)."""
+    boot = protocol.get("bootstrap", {})
+    key = protocol.get("group_key", "group")
+    by_slice = {}
+    for spec in specs:
+        by_slice.setdefault(tuple(str(spec.get(k) or "") for k in SLICE_KEYS), []).append(spec)
+    out = {}
+    for group_specs in by_slice.values():
+        first = group_specs[0]
+        positions = slice_positions(set_rows, base["ids"], first) if is_slice(first) else list(range(len(base["ids"])))
+        b, n = sub_table(base, positions), sub_table(new, positions)
+        groups = [str(set_rows[pid].get(key) or pid) for pid in b["ids"]]
+        metrics = list(dict.fromkeys(s["metric"] for s in group_specs))
+        stats = f1_bootstrap(groups, b, n, metrics, boot.get("n", 10000), boot.get("ci", 0.95),
+                             boot.get("rng_seed", 20261011))
+        for spec in group_specs:
+            s = dict(stats[spec["metric"]], metric=ruler_name(spec))
+            if s["pairs"] == 0:
+                raise Refuse(f"자 {ruler_name(spec)} 에 셀 쌍이 없다 — 셋의 {' · '.join(SLICE_KEYS)} 칸과 규약을 본다")
+            out[ruler_name(spec)] = s
+    return out
+
+
+def gate_f1_specs(protocol):
+    """pair_gate 의 목표 · 지킴 · 경보 중 F1 자 (나온 차례, 같은 이름은 하나). g8 이하 규약은 빈 목록."""
+    gate = protocol.get("pair_gate", {})
+    specs = {}
+    for spec in [gate.get("target", {})] + gate.get("guards", []) + gate.get("alarms", []):
+        if is_f1(spec.get("metric")):
+            specs.setdefault(ruler_name(spec), spec)
+    return list(specs.values())
+
+
+def check_min_seeds(protocol, base_runs, new_runs):
+    """pair_gate.min_seeds(g9 부터)보다 씨앗이 적은 쪽이 있으면 Refuse — 씨앗 2~3 이면 A/A 헛깨짐이 20~55% 다."""
+    need = protocol.get("pair_gate", {}).get("min_seeds")
+    if need and min(len(base_runs), len(new_runs)) < need:
+        raise Refuse(f"씨앗이 모자라다 — 기준 {len(base_runs)} · 새 판 {len(new_runs)} < 규약 min_seeds {need}")
+
+
 def majority(table, metric):
     """세는 쌍마다 「씨앗 과반이 맞혔나」 (맞힌 수 × 2 > 씨앗 수)."""
     mask, hits = hit_counts(table, metric)
@@ -500,6 +622,7 @@ def pred_shift(set_rows, base, new, key="domain", min_n=20):
 
 def compare(protocol, set_rows, base_runs, new_runs):
     """두 조건의 쌍 표 · 지표별 구간 · McNemar · 거짓 지지 · 곁 자 · 보고만 칸."""
+    check_min_seeds(protocol, base_runs, new_runs)
     ids = [pid for pid in set_rows]
     base = pair_hits(base_runs, ids)
     new = pair_hits(new_runs, ids)
@@ -516,6 +639,7 @@ def compare(protocol, set_rows, base_runs, new_runs):
         stats["metrics"][metric] = s
     for spec in gate_slice_specs(protocol):
         stats["metrics"][ruler_name(spec)] = slice_compare(protocol, set_rows, base, new, spec)
+    stats["metrics"].update(f1_compare(protocol, set_rows, base, new, gate_f1_specs(protocol)))   # g8 이하는 빈 목록
     stats["false_support"] = {"base": false_support_mean(base), "new": false_support_mean(new)}
     side_names = protocol.get("side", {})
     stats["side"] = {"base": side_means(base_runs, side_names), "new": side_means(new_runs, side_names)}
@@ -587,7 +711,7 @@ def verdict(protocol, stats):
             if sn.get("k48_hits") is not None and sn["k48_hits"] < alarm["min"]:
                 alarms.append(f"K48 맞힌 수 평균 {sn['k48_hits']:.1f} < {alarm['min']}")
             continue
-        if alarm["metric"] in METRICS:
+        if alarm["metric"] in METRICS or is_f1(alarm["metric"]):
             # 새 꼴 (g3) — {"metric": "b_recall", "domain": "mem", "lang": "ko", "min_mean_diff": …} 를 걸러 쓴 자로
             name = ruler_name(alarm)
             diff = stats["metrics"][name]["diff"]
@@ -620,8 +744,8 @@ def to_markdown(result):
              "| 지표 | base | new | 차 | 95% 구간 | McNemar b/c · p |", "| --- | --- | --- | --- | --- | --- |"]
     for metric, s in result["stats"]["metrics"].items():
         m = s["mcnemar"]
-        lines.append(f"| {metric} | {s['base']} | {s['new']} | {s['diff']} | [{s['low']}, {s['high']}] "
-                     f"| {m['b']}/{m['c']} · {m['p']} |")
+        test = f"{m['b']}/{m['c']} · {m['p']}" if m else "—"   # F1 자는 McNemar 가 없다 (None)
+        lines.append(f"| {metric} | {s['base']} | {s['new']} | {s['diff']} | [{s['low']}, {s['high']}] | {test} |")
     lines += ["", "| 관문 | 결과 | 값 |", "| --- | --- | --- |"]
     t = result["verdict"]["target"]
     lines.append(f"| 목표 {t['metric']} | {'O' if t['ok'] else 'X'} | {t['diff']:+.4f} [{t['low']:+.4f}, {t['high']:+.4f}] |")

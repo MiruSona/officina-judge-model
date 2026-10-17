@@ -166,7 +166,10 @@ def vs_ref_rows(protocol, set_rows, table, ref_run):
         if ref is None:
             rows.append((name, None, need, None))
             continue
-        if cmp.is_slice(spec):
+        if cmp.is_f1(metric):
+            # g9 꼴 F1 자 — 뽑기마다 혼동표를 다시 세는 셈 (짝 비교와 같은 함수, 거름 칸도 같이 본다)
+            s = cmp.f1_compare(protocol, set_rows, ref, table, [spec])[cmp.ruler_name(spec)]
+        elif cmp.is_slice(spec):
             # g3 꼴 {"metric": "b_recall", "lang": "ko", …} — 걸러진 쌍만으로 같은 셈 (짝 비교와 같은 함수)
             s = cmp.slice_compare(protocol, set_rows, ref, table, spec)
         else:
