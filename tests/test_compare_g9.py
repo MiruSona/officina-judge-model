@@ -109,7 +109,13 @@ class G9PairTest(unittest.TestCase):
         self.assertEqual(names, ["b_f1@en", "b_f1", "macro_f1", "a_f1", "c_f1", "d_f1", "false_support", "side_acc3",
                                  "b_f1@ko", "b_recall@ko", "b_recall@en"])
         self.assertTrue(all(g["ok"] for g in v["guards"]))
-        self.assertEqual(v["verdict"], "같다")             # 목표 c_recall@ko 는 1 → 1
+        # 목표 macro_f1@ko/nogen (손 셋엔 form 칸이 없어 뺄 쌍 0) — ko 묶음 g1~g3 셋 다 같은 꼴이라 구간 = 점값 차
+        # base ko : d tp 30 · 예측 d 30 · 정답 d 60 → .6667 · c tp 15 · 예측 c 45 · 정답 c 15 → .5 → macro .7917
+        # new ko : d tp 48 · 예측 d 48 → 96/108 = .8889 · c 예측 27 → 30/42 = .7143 → macro .9008 · 차 +.1091
+        self.assertEqual(v["target"]["metric"], "macro_f1@ko/nogen")
+        self.assertEqual((v["target"]["diff"], v["target"]["low"]), (0.1091, 0.1091))
+        self.assertEqual(m["macro_f1@ko"]["diff"], 0.1091)  # 모든 쌍 짝 (보고만) — 뺄 쌍이 없으니 같다
+        self.assertEqual(v["verdict"], "먹힘")
 
     def test_b_broken(self):
         # broken_pred : g1 · g2(ko) 의 b 넷을 a 로 → b F1@ko 와 재현 바닥이 깨진다
@@ -170,14 +176,19 @@ class G9ProtocolTest(unittest.TestCase):
     """protocol-g9 — g8 에서 바뀌는 칸은 지킴 · min_seeds · 문구뿐 (E5 5절 · 사용자 확정 2026-10-17)."""
 
     def test_same_as_g8_but_guards(self):
+        # K7 설계 1-5 : g8 에서 바뀌는 칸은 지킴 · min_seeds · 비교 셋(dev-cmp-g9) · 목표 · 보고만 · 생성기 꼴 · 학습 고정값
         g8, _ = cmp.read_protocol(PROTOCOL_G8)
         g9, _ = cmp.read_protocol(PROTOCOL_G9)
-        for key in ("sets", "compare_on", "calibrate_on", "release_pick", "bootstrap", "seeds", "majority", "release_gate",
-                    "side", "group_key", "label_guide", "report_only_sets", "seed_rerun", "ckpt", "train_sets",
-                    "cell_check", "sets_note", "train_sets_note"):
+        for key in ("calibrate_on", "bootstrap", "seeds", "majority", "release_gate", "side", "group_key", "label_guide",
+                    "seed_rerun", "ckpt", "train_sets"):
             self.assertEqual(g9[key], g8[key], key)
-        for key in ("target", "alarms", "alarms_note", "slice_note", "base"):
+        for key in ("alarms", "alarms_note", "slice_note", "base"):
             self.assertEqual(g9["pair_gate"][key], g8["pair_gate"][key], key)
+        self.assertEqual(g9["release_pick"], dict(g8["release_pick"], set="dev-cmp-g9"))
+        self.assertEqual(g9["cell_check"]["dev"], "dev-cmp-g9")
+        self.assertEqual(g9["cell_check"]["recipe"], g9["train"]["recipe"])
+        self.assertEqual({k: v for k, v in g9["cell_check"].items() if k not in ("dev", "recipe", "note")},
+                         {k: v for k, v in g8["cell_check"].items() if k not in ("dev", "recipe", "note")})
         self.assertNotIn("draft_note", g9)
         self.assertEqual((g9["name"], g9["pair_gate"]["min_seeds"]), ("protocol-g9", 5))
         self.assertEqual(g9["bootstrap"], {"n": 10000, "ci": 0.95, "rng_seed": 20261011, "resample": "group",
@@ -213,6 +224,122 @@ class G9ReleaseF1Test(unittest.TestCase):
             self.assertEqual(rows[0][1]["diff"], round(0.9474 - 0.6667, 4))
             self.assertIs(rows[0][3], True)
 
+
+
+def form_fixture(tmp, protocol_path=PROTOCOL_G9, forms=None):
+    """손 셋에 form 칸을 단 짝 — ko 묶음 g1~g3 의 넷째 d(k 3)를 near-x 로. 셋 해시 · 규약 해시를 다시 맞춘다."""
+    fx = tc.Fixture(tmp, protocol_path)
+    for row in fx.set_rows:
+        row["form"] = "near-x" if row["lang"] == "ko" and row["k"] == 3 else "labeled"
+    tc.write_jsonl(fx.set_path, fx.set_rows)
+    fx.set_sha = cmp.sha256_file(fx.set_path)
+    with open(fx.protocol, encoding="utf-8") as f:
+        protocol = json.load(f)
+    protocol["sets"][protocol["compare_on"]] = fx.set_sha
+    if forms is not None:
+        protocol["generator_forms"] = forms
+    with open(fx.protocol, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(protocol, f, ensure_ascii=False, indent=1)
+    fx.protocol_sha = cmp.sha256_file(fx.protocol)
+    return fx
+
+
+class GeneratorFormsTest(unittest.TestCase):
+    """목표 자는 generator_forms 꼴을 뺀 쌍으로, 모든 쌍 값은 곁에 보고만, 지킴은 모든 쌍 그대로 (K7 설계 1-3)."""
+
+    def test_target_drops_generator_forms(self):
+        # 뺀 ko 쌍 21 (묶음마다 d 셋 · b 둘 · a · c) · 씨앗 5
+        # base : d k0 · k1 만 d → d tp 30 · 예측 30 · 정답 45 → .8 · c tp 15 · 예측 30 → 30/45 = .6667 → macro .8667
+        # new  : d k0~k2 다 d → d · c F1 1 → macro 1 · 차 +.1333 (모든 쌍 짝은 .7917 → .9008, +.1091)
+        with tempfile.TemporaryDirectory() as tmp:
+            fx = form_fixture(tmp)
+            protocol, stats = fx.stats(tc.base_pred, tc.new_pred, seeds=SEEDS5)
+        m = stats["metrics"]
+        self.assertEqual((m["macro_f1@ko/nogen"]["base"], m["macro_f1@ko/nogen"]["new"], m["macro_f1@ko/nogen"]["diff"]),
+                         (0.8667, 1.0, 0.1333))
+        self.assertEqual(m["macro_f1@ko/nogen"]["pairs"], 21)
+        self.assertEqual((m["macro_f1@ko"]["pairs"], m["macro_f1@ko"]["diff"]), (24, 0.1091))
+        v = cmp.verdict(protocol, stats)
+        self.assertEqual((v["target"]["metric"], v["target"]["diff"]), ("macro_f1@ko/nogen", 0.1333))
+        self.assertNotIn("macro_f1@ko", [g["metric"] for g in v["guards"]])     # 모든 쌍 짝은 판정에 안 쓴다
+        self.assertEqual(stats["generator_forms"]["rulers"],
+                         [{"ruler": "macro_f1@ko/nogen", "all_pairs_ruler": "macro_f1@ko", "all_pairs": 24, "pairs": 21,
+                           "dropped": 3, "by_form": {"near-x": 3}}])
+
+    def test_guards_keep_all_pairs(self):
+        # 지킴은 꼴을 안 뺀다 — b_f1@ko · d_f1 의 쌍 수 · 값이 form 칸 없는 셋과 같다
+        with tempfile.TemporaryDirectory() as tmp:
+            _, plain = tc.Fixture(tmp, PROTOCOL_G9).stats(tc.base_pred, tc.new_pred, seeds=SEEDS5)
+        with tempfile.TemporaryDirectory() as tmp:
+            _, marked = form_fixture(tmp).stats(tc.base_pred, tc.new_pred, seeds=SEEDS5)
+        for name in ("b_f1@ko", "d_f1", "macro_f1", "b_recall@ko", "c_recall@ko"):
+            self.assertEqual(marked["metrics"][name], plain["metrics"][name], name)
+        self.assertEqual(marked["metrics"]["b_f1@ko"]["pairs"], 24)
+
+    def test_missing_list_refused(self):
+        # 목표가 drop_forms 를 달았는데 규약에 목록이 비면 조용히 다 세지 않고 거부
+        with tempfile.TemporaryDirectory() as tmp:
+            fx = form_fixture(tmp, forms=[])
+            with self.assertRaises(cmp.Refuse):
+                fx.stats(tc.base_pred, tc.new_pred, seeds=SEEDS5)
+        with self.assertRaises(cmp.Refuse):
+            cmp.drop_forms({}, {"metric": "macro_f1", "drop_forms": "other_forms"})
+
+    def test_markdown_line_and_g8_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            protocol, stats = form_fixture(tmp).stats(tc.base_pred, tc.new_pred, seeds=SEEDS5)
+        stats.pop("_tables")
+        result = {"base": "B0", "new": "B1", "set_sha256": "0" * 64, "protocol_sha256": "1" * 64,
+                  "stats": stats, "verdict": cmp.verdict(protocol, stats)}
+        md = cmp.to_markdown(result)
+        self.assertIn("- 생성기 꼴 뺌 macro_f1@ko/nogen : 쌍 24 중 3 뺌 (near-x 3) — 모든 쌍 값 macro_f1@ko 은 보고만", md)
+        self.assertIn("| 목표 macro_f1@ko/nogen | O |", md)
+        # g8 은 drop_forms 자가 없어 출력 칸 · 자 이름이 그대로다 (G8RegressionTest 와 같은 셈)
+        with tempfile.TemporaryDirectory() as tmp:
+            _, g8 = form_fixture(tmp, PROTOCOL_G8).stats(tc.base_pred, tc.new_pred)
+        self.assertNotIn("generator_forms", g8)
+        self.assertFalse([k for k in g8["metrics"] if k.endswith(cmp.DROP_TAIL)])
+
+
+class G9SetsTest(unittest.TestCase):
+    """protocol-g9 의 K7 칸 — dev-cmp-g9 (해시는 얼린 뒤) · 옛 셋 보고만 · 목표 · 학습 고정값 · prereg 다음 걸음."""
+
+    def test_k7_fields(self):
+        g8, _ = cmp.read_protocol(PROTOCOL_G8)
+        g9, _ = cmp.read_protocol(PROTOCOL_G9)
+        self.assertEqual(g9["compare_on"], "dev-cmp-g9")
+        self.assertIsNone(g9["sets"]["dev-cmp-g9"])
+        self.assertNotIn("dev-cmp-g4", g9["sets"])
+        self.assertEqual(g9["report_only_sets"]["dev-cmp-g4"], g8["sets"]["dev-cmp-g4"])
+        self.assertEqual({k: g9["sets"][k] for k in ("dev-cal-g3", "blind-g4")},
+                         {k: g8["sets"][k] for k in ("dev-cal-g3", "blind-g4")})
+        self.assertEqual(g9["pair_gate"]["target"], {"metric": "macro_f1", "lang": "ko", "drop_forms": "generator_forms",
+                                                     "min_mean_diff": 0.03, "ci_low_gt": 0.0})
+        self.assertEqual(g9["pair_gate"]["new"], "K7")
+        self.assertIn("near-x", g9["generator_forms"])
+        self.assertEqual(g9["train"]["class_weight_fixed"],
+                         [0.8646582405778421, 0.9994239425532274, 0.8340563960214578, 1.3018614208474724])
+        self.assertTrue(g9["pair_gate"]["report_only"])
+
+    def test_null_set_hash_refused(self):
+        # 셋을 얼리기 전(null)에는 compare 가 대조를 건너뛰지 않고 거부한다. 옛 꼴 빈 글자는 예전처럼 건너뛴다
+        g9, _ = cmp.read_protocol(PROTOCOL_G9)
+        with self.assertRaisesRegex(cmp.Refuse, "아직 비었다"):
+            cmp.check_hashes(g9, "p" * 64, "s" * 64, [])
+        cmp.check_hashes(dict(g9, sets=dict(g9["sets"], **{"dev-cmp-g9": ""})), "p" * 64, "s" * 64, [])
+
+    def test_prereg_next_g9(self):
+        import prereg
+
+        g9, _ = cmp.read_protocol(PROTOCOL_G9)
+        got = prereg.next_for_gate("/x/protocol-g9.json")
+        self.assertIs(got, prereg.NEXT_G9)
+        self.assertEqual(set(got), {"pass", "p95_only", "fail", "먹힘", "지킴 깨짐", "두 판 연속", "같다"})
+        self.assertIn("E6", got["먹힘"])
+        self.assertIn("v1.2 접음", got["두 판 연속"])
+        self.assertIn("8092 v1.1.0 유지", got["두 판 연속"])
+        self.assertIn("대체 판은 적지 않는다", got["지킴 깨짐"])
+        self.assertTrue(set(g9["pair_gate"]["verdicts"]) >= {"먹힘", "지킴 깨짐", "같다"})
 
 if __name__ == "__main__":
     unittest.main()

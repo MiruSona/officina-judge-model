@@ -117,6 +117,31 @@ class HeadsTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 heads.parse_weight_scale(bad)
 
+    # K5 train_info hparams.class_weight (runs/g1-K5-s1~s5 다섯 씨앗 같음) — K7 이 --class-weight-fixed 로 받는 값
+    K5_WEIGHTS = "0.8646582405778421,0.9994239425532274,0.8340563960214578,1.3018614208474724"
+
+    def test_fixed_weights_round_trip(self):
+        # 글 → 실수가 손실 없이 돌아온다 (K5 값 그대로 = 같은 손실 가중) · 빈 글이면 고정 안 함
+        got = heads.fixed_weights(self.K5_WEIGHTS)
+        self.assertEqual(got, [0.8646582405778421, 0.9994239425532274, 0.8340563960214578, 1.3018614208474724])
+        self.assertEqual(",".join(repr(w) for w in got), self.K5_WEIGHTS)
+        self.assertIsNone(heads.fixed_weights(""))
+        self.assertIsNone(heads.fixed_weights("  "))
+        self.assertEqual(heads.row_weight(got, {"src": "mem", "label": 1}), got[1])
+
+    def test_fixed_weights_bad_values_stop(self):
+        for bad in ("1,1,1", "1,1,1,1,1", "1,x,1,1", "1,0,1,1", "1,-1,1,1", "1,inf,1,1", "1,nan,1,1"):
+            with self.assertRaises(ValueError, msg=bad):
+                heads.fixed_weights(bad)
+
+    def test_fixed_weights_with_auto_or_scale_stops(self):
+        # 고정값 + --class-weight(자동 셈) · --class-weight-scale(배수) 는 같이 못 쓴다 — 명확한 까닭으로 멈춘다
+        with self.assertRaisesRegex(ValueError, "같이 못 쓴다"):
+            heads.fixed_weights(self.K5_WEIGHTS, auto=True)
+        with self.assertRaisesRegex(ValueError, "같이 못 쓴다"):
+            heads.fixed_weights(self.K5_WEIGHTS, scale={1: 1.2})
+        self.assertIsNone(heads.fixed_weights("", auto=True, scale={1: 1.2}))   # 고정값이 없으면 옛 길 그대로
+
     def test_class_weights_four_mean_one(self):
         rows = [{"src": "mem", "label": 0}] * 6 + [{"src": "mem", "label": 1}] * 3 + \
                [{"src": "mem", "label": 2}] * 4 + [{"src": "mem", "label": 3}] * 2 + \
@@ -540,9 +565,9 @@ class PreregFourTest(unittest.TestCase):
     def test_unknown_vs_ref_protocol_needs_next(self):
         gate = {"release_gate": protocol_gate_g2()}
         with self.assertRaises(SystemExit):
-            prereg.build(self.four_spec(), {}, set(), set(), gate, "/x/protocol-g9.json", "e" * 64)
+            prereg.build(self.four_spec(), {}, set(), set(), gate, "/x/protocol-g10.json", "e" * 64)
         mine = {"fail": "따로 정한 문구"}
-        got = prereg.build(self.four_spec(), {}, set(), set(), gate, "/x/protocol-g9.json", "e" * 64, mine)
+        got = prereg.build(self.four_spec(), {}, set(), set(), gate, "/x/protocol-g10.json", "e" * 64, mine)
         self.assertEqual(got["next"], mine)
 
     def test_main_next_file_wins(self):

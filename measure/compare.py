@@ -206,16 +206,50 @@ def is_slice(spec):
 
 
 def ruler_name(spec):
-    """자 이름 — 거름이 없으면 지표 이름 그대로(g1 · g2 와 같다), 있으면 b_recall@ko · b_recall@mem·ko."""
+    """자 이름 — 거름이 없으면 지표 이름 그대로(g1 · g2 와 같다), 있으면 b_recall@ko · b_recall@mem·ko.
+    생성기 꼴을 뺀 자(drop_forms, protocol-g9 부터)는 꼬리 /nogen 을 붙인다 — macro_f1@ko/nogen."""
     parts = [str(spec[k]) for k in SLICE_KEYS if spec.get(k)]
-    return spec["metric"] + ("@" + "·".join(parts) if parts else "")
+    return spec["metric"] + ("@" + "·".join(parts) if parts else "") + (DROP_TAIL if spec.get("drop_forms") else "")
+
+
+# 생성기 꼴 빼기 (protocol-g9 부터) — 자에 "drop_forms": "generator_forms" 를 달면 셋 줄의 form 칸이
+# 규약 generator_forms 목록에 든 쌍을 빼고 센다. 뺀 자 곁에 같은 자를 모든 쌍으로 센 값을 보고만 싣는다
+DROP_TAIL = "/nogen"
+FORM_KEY = "form"
+DROP_LISTS = ("generator_forms",)
+
+
+def drop_forms(protocol, spec):
+    """자의 drop_forms → 뺄 꼴 이름 frozenset. 안 달렸으면 빈 것. 규약에 목록이 없거나 비면 Refuse (조용히 다 세지 않게)."""
+    which = spec.get("drop_forms")
+    if not which:
+        return frozenset()
+    if which not in DROP_LISTS:
+        raise Refuse(f"자 {ruler_name(spec)} 의 drop_forms {which!r} 를 모른다 — 쓸 수 있는 것 {DROP_LISTS}")
+    forms = protocol.get(which)
+    if not forms:
+        raise Refuse(f"자 {ruler_name(spec)} 가 {which} 를 빼라는데 규약에 그 목록이 없다")
+    return frozenset(str(f) for f in forms)
+
+
+def with_drop(protocol, spec):
+    """drop_forms 자 → 뺄 꼴을 품은 자 복사본(_drop). 안 달린 자는 그대로."""
+    forms = drop_forms(protocol, spec)
+    return dict(spec, _drop=forms) if forms else spec
+
+
+def all_pairs_twin(spec):
+    """drop_forms 자의 「모든 쌍」 짝 — 같은 지표 · 같은 거름, 꼴은 안 뺀다 (보고만)."""
+    return {k: v for k, v in spec.items() if k not in ("drop_forms", "_drop")}
 
 
 def slice_positions(set_rows, ids, spec):
-    """쌍 표 차례(ids)에서 거름 칸이 다 맞는 자리 번호."""
+    """쌍 표 차례(ids)에서 거름 칸이 다 맞는 자리 번호. 자에 _drop(with_drop)이 있으면 그 꼴의 쌍은 뺀다."""
     want = {k: str(spec[k]) for k in SLICE_KEYS if spec.get(k)}
+    drop = spec.get("_drop") or ()
     return [pos for pos, pid in enumerate(ids)
-            if all(str(set_rows.get(pid, {}).get(k)) == v for k, v in want.items())]
+            if all(str(set_rows.get(pid, {}).get(k)) == v for k, v in want.items())
+            and str(set_rows.get(pid, {}).get(FORM_KEY)) not in drop]
 
 
 def sub_table(table, positions):
@@ -255,13 +289,24 @@ def expand_alarm(alarm):
             for lang in alarm.get("langs", [""]) for m in RECALLS]
 
 
-def gate_slice_specs(protocol):
-    """pair_gate 의 목표 · 지킴 · 경보 중 걸러 쓴 자 (나온 차례, 같은 이름은 하나)."""
+def gate_specs(protocol):
+    """pair_gate 의 목표 · 지킴 · 경보 자 (나온 차례). drop_forms 자는 뺄 꼴을 품고(with_drop), 바로 뒤에 모든 쌍 짝이 온다."""
     gate = protocol.get("pair_gate", {})
-    specs = {}
     alarms = [spec for alarm in gate.get("alarms", []) for spec in expand_alarm(alarm)]
+    out = []
     for spec in [gate.get("target", {})] + gate.get("guards", []) + alarms:
-        if spec.get("metric") in METRICS and is_slice(spec):
+        if spec.get("drop_forms"):
+            out += [with_drop(protocol, spec), all_pairs_twin(spec)]
+        else:
+            out.append(spec)
+    return out
+
+
+def gate_slice_specs(protocol):
+    """pair_gate 의 목표 · 지킴 · 경보 중 걸러 쓴 재현 자 (나온 차례, 같은 이름은 하나). 생성기 꼴을 뺀 자도 여기 든다."""
+    specs = {}
+    for spec in gate_specs(protocol):
+        if spec.get("metric") in METRICS and (is_slice(spec) or spec.get("_drop")):
             specs.setdefault(ruler_name(spec), spec)
     return list(specs.values())
 
@@ -426,11 +471,13 @@ def f1_compare(protocol, set_rows, base, new, specs):
     key = protocol.get("group_key", "group")
     by_slice = {}
     for spec in specs:
-        by_slice.setdefault(tuple(str(spec.get(k) or "") for k in SLICE_KEYS), []).append(spec)
+        cut = tuple(str(spec.get(k) or "") for k in SLICE_KEYS) + (tuple(sorted(spec.get("_drop") or ())),)
+        by_slice.setdefault(cut, []).append(spec)
     out = {}
     for group_specs in by_slice.values():
         first = group_specs[0]
-        positions = slice_positions(set_rows, base["ids"], first) if is_slice(first) else list(range(len(base["ids"])))
+        cut = is_slice(first) or first.get("_drop")
+        positions = slice_positions(set_rows, base["ids"], first) if cut else list(range(len(base["ids"])))
         b, n = sub_table(base, positions), sub_table(new, positions)
         groups = [str(set_rows[pid].get(key) or pid) for pid in b["ids"]]
         metrics = list(dict.fromkeys(s["metric"] for s in group_specs))
@@ -446,9 +493,8 @@ def f1_compare(protocol, set_rows, base, new, specs):
 
 def gate_f1_specs(protocol):
     """pair_gate 의 목표 · 지킴 · 경보 중 F1 자 (나온 차례, 같은 이름은 하나). g8 이하 규약은 빈 목록."""
-    gate = protocol.get("pair_gate", {})
     specs = {}
-    for spec in [gate.get("target", {})] + gate.get("guards", []) + gate.get("alarms", []):
+    for spec in gate_specs(protocol):
         if is_f1(spec.get("metric")):
             specs.setdefault(ruler_name(spec), spec)
     return list(specs.values())
@@ -545,7 +591,11 @@ def calib_sha(calibration):
 
 def check_hashes(protocol, protocol_sha, set_sha, conditions):
     """두 조건의 모든 판이 같은 셋 · 같은 규약을 쟀나, calibration 이 잴 셋으로 고르지 않았나. 어긋나면 Refuse."""
-    want = protocol.get("sets", {}).get(protocol.get("compare_on", ""), "")
+    sets = protocol.get("sets", {})
+    if protocol.get("compare_on") in sets and sets[protocol["compare_on"]] is None:
+        # null = 셋을 아직 안 얼렸다 (protocol-g9 의 dev-cmp-g9). 빈 글자("")인 옛 규약은 예전처럼 대조를 건너뛴다
+        raise Refuse(f"규약의 {protocol['compare_on']} 해시가 아직 비었다(null) — 셋을 얼린 뒤 규약에 채운다")
+    want = sets.get(protocol.get("compare_on", ""), "")
     if want and want != set_sha:
         raise Refuse(f"--set 해시 {set_sha[:12]} 가 규약의 {protocol['compare_on']} 해시 {want[:12]} 와 다르다")
     for name, runs in conditions:
@@ -620,6 +670,28 @@ def pred_shift(set_rows, base, new, key="domain", min_n=20):
     return out
 
 
+def drop_report(protocol, set_rows, ids):
+    """drop_forms 자마다 뺀 쌍 수 — {forms, rulers: [{ruler, all_pairs, pairs, dropped, by_form}]}. 그런 자가 없으면 None."""
+    rulers = []
+    for spec in gate_specs(protocol):
+        if not spec.get("_drop"):
+            continue
+        whole = slice_positions(set_rows, ids, all_pairs_twin(spec))
+        kept = set(slice_positions(set_rows, ids, spec))
+        by_form = {}
+        for pos in whole:
+            if pos not in kept:
+                form = str(set_rows.get(ids[pos], {}).get(FORM_KEY))
+                by_form[form] = by_form.get(form, 0) + 1
+        rulers.append({"ruler": ruler_name(spec), "all_pairs_ruler": ruler_name(all_pairs_twin(spec)),
+                       "all_pairs": len(whole), "pairs": len(kept), "dropped": len(whole) - len(kept),
+                       "by_form": dict(sorted(by_form.items()))})
+    if not rulers:
+        return None
+    forms = sorted({f for spec in gate_specs(protocol) for f in (spec.get("_drop") or ())})
+    return {"forms": forms, "rulers": rulers}
+
+
 def compare(protocol, set_rows, base_runs, new_runs):
     """두 조건의 쌍 표 · 지표별 구간 · McNemar · 거짓 지지 · 곁 자 · 보고만 칸."""
     check_min_seeds(protocol, base_runs, new_runs)
@@ -640,6 +712,9 @@ def compare(protocol, set_rows, base_runs, new_runs):
     for spec in gate_slice_specs(protocol):
         stats["metrics"][ruler_name(spec)] = slice_compare(protocol, set_rows, base, new, spec)
     stats["metrics"].update(f1_compare(protocol, set_rows, base, new, gate_f1_specs(protocol)))   # g8 이하는 빈 목록
+    dropped = drop_report(protocol, set_rows, base["ids"])
+    if dropped is not None:        # 옛 규약(drop_forms 자 없음)의 출력 칸은 그대로 둔다
+        stats["generator_forms"] = dropped
     stats["false_support"] = {"base": false_support_mean(base), "new": false_support_mean(new)}
     side_names = protocol.get("side", {})
     stats["side"] = {"base": side_means(base_runs, side_names), "new": side_means(new_runs, side_names)}
@@ -740,8 +815,12 @@ def verdict(protocol, stats):
 def to_markdown(result):
     lines = [f"## 짝 비교 {result['base']} → {result['new']} : **{result['verdict']['verdict']}**", "",
              f"- 쌍 {result['stats']['pairs']} · 묶음 {result['stats']['groups']} · 씨앗 {result['stats']['seeds']}"
-             f" · 셋 {result['set_sha256'][:12]} · 규약 {result['protocol_sha256'][:12]}", "",
-             "| 지표 | base | new | 차 | 95% 구간 | McNemar b/c · p |", "| --- | --- | --- | --- | --- | --- |"]
+             f" · 셋 {result['set_sha256'][:12]} · 규약 {result['protocol_sha256'][:12]}"]
+    for r in (result["stats"].get("generator_forms") or {}).get("rulers", []):
+        forms = " · ".join(f"{f} {n}" for f, n in r["by_form"].items()) or "없음"
+        lines.append(f"- 생성기 꼴 뺌 {r['ruler']} : 쌍 {r['all_pairs']} 중 {r['dropped']} 뺌 ({forms}) — "
+                     f"모든 쌍 값 {r['all_pairs_ruler']} 은 보고만")
+    lines += ["", "| 지표 | base | new | 차 | 95% 구간 | McNemar b/c · p |", "| --- | --- | --- | --- | --- | --- |"]
     for metric, s in result["stats"]["metrics"].items():
         m = s["mcnemar"]
         test = f"{m['b']}/{m['c']} · {m['p']}" if m else "—"   # F1 자는 McNemar 가 없다 (None)

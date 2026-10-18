@@ -129,6 +129,16 @@ class TrainPiecesTest(unittest.TestCase):
         self.assertEqual(self.t.parse_args(["--out", "x"]).select, "base")
         self.assertEqual(self.t.parse_args(["--out", "x", "--stage", "studio", "--select", "studio"]).select, "studio")
 
+    def test_class_weight_fixed_args(self):
+        # --class-weight-fixed 는 네 값을 그대로 받고, --class-weight · --class-weight-scale 과 같이 오면 멈춘다
+        fixed = "0.8646582405778421,0.9994239425532274,0.8340563960214578,1.3018614208474724"
+        args = self.t.parse_args(["--out", "x", "--class-weight-fixed", fixed])
+        self.assertEqual(args.weight_fixed, [float(v) for v in fixed.split(",")])
+        self.assertIsNone(self.t.parse_args(["--out", "x"]).weight_fixed)
+        for extra in (["--class-weight"], ["--class-weight-scale", "b=1.2"], ["--class-weight", "--class-weight-scale", "b=1.2"]):
+            with self.assertRaises(SystemExit, msg=extra):
+                self.t.parse_args(["--out", "x", "--class-weight-fixed", fixed] + extra)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -86,10 +86,22 @@ NEXT_G8 = {
     "p95_only": "int8 → 그래도 넘으면 K6 는 내지 않고 8092 는 v1.1.0 유지",
     "fail": "출시 관문 미달 — K6 는 내지 않고 8092 는 v1.1.0 유지 · blind-g4 는 쓴 셋",
 }
+# g9 (K7 판) — 출시 관문 세 칸에 더해 짝 비교 멈춤 규칙(K7 설계 3절 · 사용자 확정 ⑦)을 같이 박제한다.
+# 짝 비교 칸 이름은 compare 판정 낱말(먹힘 · 지킴 깨짐 · 같다)과 「두 판 연속」 — prereg 는 blind-g4 를 열기 직전에
+# 쓰므로 먹힘 칸이 곧 이 박제의 앞 조건이다
+NEXT_G9 = {
+    "pass": "gates.py release 통과 — 8092 교체는 사용자가 정한다",
+    "p95_only": "int8 → 그래도 넘으면 K7 은 내지 않고 8092 는 v1.1.0 유지",
+    "fail": "출시 관문 미달 — K7 은 내지 않고 8092 는 v1.1.0 유지 · blind-g4 는 쓴 셋",
+    "먹힘": "K7 먹힘(목표 통과 · 지킴 깨짐 0) — 비공개 조사 E6 결과로 출시 관문을 고친 뒤에만 blind-g4 를 연다",
+    "지킴 깨짐": "K7 지킴 깨짐 — 진단(pred.jsonl 혼동표 · 원천 × 칸 · 구간) → 사용자. 대체 판은 적지 않는다",
+    "두 판 연속": "g9 지킴이 두 판 연속 깨짐 — v1.2 접음 · 8092 v1.1.0 유지 (사용자에게 알림). 연속 수는 K7 부터 센다",
+    "같다": "목표만 미달 · 판별 불가 — 메인 판단 → 사용자",
+}
 # 기준 모델 대비 규약(vs_ref)의 다음 걸음 — 규약 파일 이름으로 고른다. 표에 없는 이름은 --next 로 준다.
 NEXT_BY_PROTOCOL = {"protocol-g2.json": NEXT_G2, "protocol-g3.json": NEXT_G3, "protocol-g4.json": NEXT_G4,
                     "protocol-g5.json": NEXT_G5, "protocol-g6.json": NEXT_G6,
-                    "protocol-g7.json": NEXT_G7, "protocol-g8.json": NEXT_G8}
+                    "protocol-g7.json": NEXT_G7, "protocol-g8.json": NEXT_G8, "protocol-g9.json": NEXT_G9}
 NEXT_V2 = {
     "pass": "nli-studio-v3 를 꽂는다 (응답 nli-v2) · 손님 판올림 · 작업 기록",
     "p95_only": "int8 → 그래도 넘으면 옛 서버(nli-studio-v2) 유지",

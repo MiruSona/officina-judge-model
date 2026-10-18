@@ -44,7 +44,7 @@ import torch  # noqa: E402
 from data_prep import (CD, CD_COLS, LABELS, LICENSES, SOURCE_LABELS, is_label, read_pairs,  # noqa: E402
                        sha256_file, train_target)
 # class_weights · metrics_from 은 torch 없이 도는 heads 에 있다 (eval_nli · 시험이 여기서도 부른다)
-from heads import (class_weights, epoch_end_metrics, metrics_from, min_recall, parse_weight_scale,  # noqa: E402,F401
+from heads import (class_weights, epoch_end_metrics, fixed_weights, metrics_from, min_recall, parse_weight_scale,  # noqa: E402,F401
                    row_weight, scale_weights)
 from pairenc import check_no_token_types, encode_pair  # noqa: E402
 
@@ -107,6 +107,10 @@ def parse_args(argv=None):
     p.add_argument("--class-weight-scale", default="",
                    help="갈래 가중에 곱할 칸별 배수 (예 b=1.2 · a=1.0,b=1.2) — 곱한 뒤 평균 1 로 다시 맞춘다. "
                         "--class-weight 와 같이 (설계 8절 「b 를 1.2 로 한 번만」)")
+    p.add_argument("--class-weight-fixed", default="",
+                   help="갈래 가중을 층 줄 수로 셈하지 않고 이 값 그대로 쓴다 — 쉼표로 a,b,c,d 네 실수 (0 보다 큼). "
+                        "지난 판 train_info hparams.class_weight 를 옮겨 판마다 가중이 안 바뀌게 묶는다 (K7 설계 1-4). "
+                        "--class-weight · --class-weight-scale 과 같이 못 쓴다")
     p.add_argument("--dev", default="", help="평가 셋 jsonl")
     p.add_argument("--dev-limit", type=int, default=3000)
     p.add_argument("--out", required=True, help="판 폴더 runs/<run_id>")
@@ -154,6 +158,10 @@ def parse_args(argv=None):
         args.weight_scale = parse_weight_scale(args.class_weight_scale)
     except ValueError as e:
         p.error(f"--class-weight-scale : {e}")
+    try:   # 고정값 검사를 먼저 — 고정값 + 배수면 「배수는 --class-weight 와 같이」가 아니라 이 까닭으로 멈춘다
+        args.weight_fixed = fixed_weights(args.class_weight_fixed, args.class_weight, args.weight_scale)
+    except ValueError as e:
+        p.error(f"--class-weight-fixed : {e}")
     if args.weight_scale and not args.class_weight:
         p.error("--class-weight-scale 는 --class-weight 와 같이 쓴다")
     if args.replay_n is not None and not args.replay:
@@ -636,8 +644,15 @@ class Run:
             self.dropped += dropped
             self.main_rows.extend(rows)
             self.data.append((path, rows))
-        self.weights = None
-        if args.class_weight:
+        self.weights, self.weight_source = None, None
+        if getattr(args, "weight_fixed", None):
+            # 고정값 — 층 줄 수 자동 셈(heads.class_weights)을 건너뛴다. 칸 수가 머리와 다르면 멈춘다
+            if len(args.weight_fixed) != self.num_labels:
+                raise SystemExit(f"--class-weight-fixed 는 {len(args.weight_fixed)} 칸인데 머리는 {self.num_labels} 칸이다")
+            self.weights, self.weight_source = list(args.weight_fixed), "fixed"
+            log(f"갈래 가중 고정 → {self.weights}")
+        elif args.class_weight:
+            self.weight_source = "auto+scale" if args.weight_scale else "auto"
             self.weights = class_weights(targeted(self.main_rows, self.num_labels), self.num_labels)
             if args.weight_scale:
                 self.weights = scale_weights(self.weights, args.weight_scale)
@@ -740,6 +755,7 @@ class Run:
             "hparams": {"lr": st["lr"], "epochs": args.epochs, "batch": args.batch, "accum": args.accum,
                         "warmup": args.warmup, "wd": args.wd, "eps": args.eps, "betas": args.betas,
                         "eval_every": args.eval_every, "select": args.select, "class_weight": self.weights, "class_weight_scale": args.class_weight_scale,
+                        "class_weight_source": self.weight_source,
                         "mix_klue": args.mix_klue if args.replay else None, "new_head": args.new_head,
                         "grow_head": args.grow_head or None,
                         "total_steps": self.total_steps},

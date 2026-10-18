@@ -54,6 +54,32 @@ def parse_weight_scale(text):
     return out
 
 
+def fixed_weights(text, auto=False, scale=None):
+    """--class-weight-fixed `0.86,1.0,0.83,1.3` → [a, b, c, d] 네 실수. 빈 글이면 None.
+
+    지난 판 train_info hparams.class_weight 를 그대로 옮겨 판마다 가중이 안 바뀌게 묶는다 (K7 설계 1-4).
+    넷이 아니거나 · 숫자가 아니거나 · 0 이하 · 무한이면, 또는 자동 셈(auto = --class-weight)이나 배수(scale)와
+    같이 오면 ValueError — 고정값에 배수를 또 곱하면 「그 판 값 그대로」가 깨진다.
+    """
+    if not (text or "").strip():
+        return None
+    if auto or scale:
+        raise ValueError("--class-weight · --class-weight-scale 과 같이 못 쓴다 — 고정값이면 자동 셈 · 배수를 끈다")
+    parts = [s.strip() for s in text.split(",")]
+    if len(parts) != len(LETTERS):
+        raise ValueError(f"a,b,c,d 네 값이어야 한다 — {len(parts)} 개를 받았다")
+    out = []
+    for letter, part in zip(LETTERS, parts):
+        try:
+            value = float(part)
+        except ValueError:
+            raise ValueError(f"{letter} 값 {part!r} 가 숫자가 아니다") from None
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{letter} 값은 0 보다 큰 유한 수여야 한다: {part}")
+        out.append(value)
+    return out
+
+
 def scale_weights(weights, scale):
     """갈래 가중에 칸별 배수를 곱하고, 쌍이 있는 갈래(가중 > 0)의 단순 평균이 다시 1 이 되게 나눈다.
 
