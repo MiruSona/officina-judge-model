@@ -179,9 +179,13 @@ class G9ProtocolTest(unittest.TestCase):
         # K7 설계 1-5 : g8 에서 바뀌는 칸은 지킴 · min_seeds · 비교 셋(dev-cmp-g9) · 목표 · 보고만 · 생성기 꼴 · 학습 고정값
         g8, _ = cmp.read_protocol(PROTOCOL_G8)
         g9, _ = cmp.read_protocol(PROTOCOL_G9)
-        for key in ("calibrate_on", "bootstrap", "seeds", "majority", "release_gate", "side", "group_key", "label_guide",
+        for key in ("calibrate_on", "bootstrap", "seeds", "majority", "side", "group_key", "label_guide",
                     "seed_rerun", "ckpt", "train_sets"):
             self.assertEqual(g9[key], g8[key], key)
+        # 출시 관문은 vs_ref(1:1 재현 → F1 자, 2026-10-18) · note 만 바뀐다 — 절대 자 · 셋 · 기준 모델은 그대로
+        same = ("vs_ref", "note", "unsure_vs_ref_max_diff_note")
+        self.assertEqual({k: v for k, v in g9["release_gate"].items() if k not in same},
+                         {k: v for k, v in g8["release_gate"].items() if k not in same})
         for key in ("alarms", "alarms_note", "slice_note", "base"):
             self.assertEqual(g9["pair_gate"][key], g8["pair_gate"][key], key)
         self.assertEqual(g9["release_pick"], dict(g8["release_pick"], set="dev-cmp-g9"))
@@ -208,7 +212,7 @@ class G9ProtocolTest(unittest.TestCase):
 
 
 class G9ReleaseF1Test(unittest.TestCase):
-    """gates.py release 의 vs_ref 도 F1 자를 읽는다 (g9 릴리스 관문은 g8 그대로라 지금은 안 쓰지만, 꼴만 맞춰 둔다)."""
+    """gates.py release 의 vs_ref 도 F1 자를 읽는다 (g9 출시 관문 vs_ref 가 쓰는 셈 — 손셈 값)."""
 
     def test_vs_ref_f1_row(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -302,13 +306,13 @@ class GeneratorFormsTest(unittest.TestCase):
 
 
 class G9SetsTest(unittest.TestCase):
-    """protocol-g9 의 K7 칸 — dev-cmp-g9 (해시는 얼린 뒤) · 옛 셋 보고만 · 목표 · 학습 고정값 · prereg 다음 걸음."""
+    """protocol-g9 의 K7 칸 — dev-cmp-g9 (해시는 10-18 얼림) · 옛 셋 보고만 · 목표 · 학습 고정값 · prereg 다음 걸음."""
 
     def test_k7_fields(self):
         g8, _ = cmp.read_protocol(PROTOCOL_G8)
         g9, _ = cmp.read_protocol(PROTOCOL_G9)
         self.assertEqual(g9["compare_on"], "dev-cmp-g9")
-        self.assertIsNone(g9["sets"]["dev-cmp-g9"])
+        self.assertRegex(g9["sets"]["dev-cmp-g9"], r"^[0-9a-f]{64}$")   # 10-18 얼림 (dev_g9.py freeze)
         self.assertNotIn("dev-cmp-g4", g9["sets"])
         self.assertEqual(g9["report_only_sets"]["dev-cmp-g4"], g8["sets"]["dev-cmp-g4"])
         self.assertEqual({k: g9["sets"][k] for k in ("dev-cal-g3", "blind-g4")},
@@ -324,8 +328,9 @@ class G9SetsTest(unittest.TestCase):
     def test_null_set_hash_refused(self):
         # 셋을 얼리기 전(null)에는 compare 가 대조를 건너뛰지 않고 거부한다. 옛 꼴 빈 글자는 예전처럼 건너뛴다
         g9, _ = cmp.read_protocol(PROTOCOL_G9)
+        unfrozen = dict(g9, sets=dict(g9["sets"], **{"dev-cmp-g9": None}))   # 얼리기 전 꼴 (10-18 에 채움)
         with self.assertRaisesRegex(cmp.Refuse, "아직 비었다"):
-            cmp.check_hashes(g9, "p" * 64, "s" * 64, [])
+            cmp.check_hashes(unfrozen, "p" * 64, "s" * 64, [])
         cmp.check_hashes(dict(g9, sets=dict(g9["sets"], **{"dev-cmp-g9": ""})), "p" * 64, "s" * 64, [])
 
     def test_prereg_next_g9(self):

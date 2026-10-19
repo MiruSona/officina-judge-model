@@ -767,5 +767,105 @@ class DeterministicEnvTest(unittest.TestCase):
             self.assertTrue(fake_torch.backends.cudnn.deterministic)
 
 
+PROTOCOL_G9 = os.path.join(helpers.ROOT, "measure", "protocol-g9.json")
+# g9 출시 관문 vs_ref 자 이름 → 문턱 (짝 비교 지킴과 같은 F1 자 · b@ko 만 「나아짐」 > 0)
+# 「안 나빠짐」 줄은 짝 비교 지킴보다 .05 넓다 — 씨앗 1:1 이라 (10-18 결정 · dev A/A 0/20)
+G9_VS_REF = {"b_f1@ko": ("ci_low_gt", 0.0), "b_f1@en": ("ci_low_ge", -0.08), "b_f1": ("ci_low_ge", -0.07),
+             "macro_f1": ("ci_low_ge", -0.07), "a_f1": ("ci_low_ge", -0.08), "c_f1": ("ci_low_ge", -0.08),
+             "d_f1": ("ci_low_ge", -0.08), "b_recall@ko": ("ci_low_ge", -0.10), "b_recall@en": ("ci_low_ge", -0.10)}
+G9_RELEASE_SLACK = 0.05
+
+
+class G9ReleaseTest(unittest.TestCase):
+    """protocol-g9 release_gate.vs_ref — 짝 비교 지킴과 같은 자(칸별 F1 · macro-F1 · 묶음 붓스트랩 아래끝). 절대 자는 그대로."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.fx = GateFixture(self._tmp.name, PROTOCOL_G9)
+        with open(self.fx.protocol, encoding="utf-8") as f:
+            protocol = json.load(f)
+        protocol["release_gate"]["min_groups"] = {"b@en": 1, "a": 2, "c": 2, "b@ko": 1}
+        with open(self.fx.protocol, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(protocol, f, ensure_ascii=False, indent=1)
+        self.fx.protocol_sha = cmp.sha256_file(self.fx.protocol)
+        self.fx.calibrate("--fitted-on", self.fx.cal_set)
+        rows = make_pred()
+        write_jsonl(self.fx.blind_set, [{"id": r["id"], "label": "abcd"[r["label"]], "group": f"g{i % 8}",
+                                         "lang": lang_of(i), "blind": 1} for i, r in enumerate(rows)])
+        self.pred = self.fx.eval_dir("eval-blind-lang", rows, self.fx.blind_set)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_vs_ref_rulers(self):
+        protocol, _ = cmp.read_protocol(PROTOCOL_G9)
+        got = {}
+        for spec in protocol["release_gate"]["vs_ref"]:
+            kind = "ci_low_gt" if "ci_low_gt" in spec else "ci_low_ge"
+            got[cmp.ruler_name(spec)] = (kind, spec[kind])
+        self.assertEqual(got, G9_VS_REF)
+
+    def test_vs_ref_matches_pair_guards(self):
+        # 「안 나빠짐」 줄은 짝 비교 지킴 줄과 같은 자(칸 · 언어)이고 문턱만 .05 넓다 — 자가 둘로 갈라지지 않게
+        protocol, _ = cmp.read_protocol(PROTOCOL_G9)
+        guards = {cmp.ruler_name(g): g for g in protocol["pair_gate"]["guards"] if "ci_low_ge" in g}
+        for spec in protocol["release_gate"]["vs_ref"]:
+            if "ci_low_ge" in spec:
+                name = cmp.ruler_name(spec)
+                self.assertIn(name, guards)
+                self.assertEqual({k: v for k, v in spec.items() if k != "ci_low_ge"},
+                                 {k: v for k, v in guards[name].items() if k != "ci_low_ge"}, name)
+                self.assertAlmostEqual(spec["ci_low_ge"], guards[name]["ci_low_ge"] - G9_RELEASE_SLACK, 9, name)
+        self.assertEqual(protocol["release_gate"]["b_recall_min"],
+                         [{"metric": "b_recall", "min": 0.80}, {"metric": "b_recall", "lang": "ko", "min": 0.70}])
+
+    def test_same_model_aa_no_false_break(self):
+        # A/A : 같은 예측을 기준 모델로 — 「안 나빠짐」 줄은 다 통과(차 0), 「나아짐」 b_f1@ko > 0 만 못 지난다
+        ref = self.fx.ref_dir(make_pred())
+        code, out, _ = self.fx.release(self.fx.blind_set, self.pred, "--ref-pred", os.path.join(ref, "pred.jsonl"),
+                                       "--ref-calibration", self.fx.calibration, "--p95-ms", "400")
+        self.assertEqual(code, 0, out)
+        result, rows = self.fx.rulers()
+        names = [r["ruler"] for r in result["rulers"] if r["ruler"].startswith("vs_ref_")]
+        self.assertEqual(names, [f"vs_ref_{k}" for k in G9_VS_REF])
+        for name in names:
+            self.assertEqual(rows[name]["value"]["diff"], 0.0, name)
+            if name == "vs_ref_b_f1@ko":
+                self.assertIs(rows[name]["ok"], False)
+                self.assertEqual(rows[name]["need"], "차 95% 아래끝 > 0.0")
+            else:
+                self.assertIs(rows[name]["ok"], True, name)
+        self.assertEqual(result["verdict"], "미달")
+
+    def test_ko_b_missed_breaks_f1(self):
+        # 잴 판이 ko b 를 다 놓침 → b_f1@ko · b_recall@ko 바닥 미달, en 줄은 통과
+        ref = self.fx.ref_dir(make_pred())
+        weak = self.fx.eval_dir("eval-weak", ko_b_missed(), self.fx.blind_set)
+        code, _, _ = self.fx.release(self.fx.blind_set, weak, "--ref-pred", os.path.join(ref, "pred.jsonl"),
+                                     "--ref-calibration", self.fx.calibration)
+        self.assertEqual(code, 0)
+        _, rows = self.fx.rulers()
+        self.assertIs(rows["vs_ref_b_f1@ko"]["ok"], False)
+        self.assertIs(rows["vs_ref_b_recall@ko"]["ok"], False)
+        self.assertIs(rows["vs_ref_b_f1@en"]["ok"], True)
+        self.assertIs(rows["vs_ref_b_recall@en"]["ok"], True)
+
+    def test_vs_ref_drop_forms_counts_without_forms(self):
+        # vs_ref 에 drop_forms 를 달면 짝 비교처럼 그 꼴의 쌍을 빼고 센다 (조용히 다 세지 않게)
+        protocol, _ = cmp.read_protocol(self.fx.protocol)
+        set_rows = cmp.read_set(self.fx.blind_set)
+        for i, pid in enumerate(sorted(set_rows)):
+            set_rows[pid]["form"] = "near-x" if i % 4 == 3 else "labeled"
+        protocol["release_gate"] = dict(protocol["release_gate"],
+                                        vs_ref=[{"metric": "macro_f1", "drop_forms": "generator_forms", "ci_low_ge": -0.02},
+                                                {"metric": "macro_f1", "ci_low_ge": -0.02}])
+        run = cmp.load_run(self.pred)
+        table = cmp.pair_hits([run], list(set_rows))
+        rows = gates.vs_ref_rows(protocol, set_rows, table, run)
+        self.assertEqual([r[0] for r in rows], ["vs_ref_macro_f1/nogen", "vs_ref_macro_f1"])
+        self.assertEqual(rows[0][1]["pairs"], 60)
+        self.assertEqual(rows[1][1]["pairs"], 80)
+
+
 if __name__ == "__main__":
     unittest.main()

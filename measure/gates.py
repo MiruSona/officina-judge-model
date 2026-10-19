@@ -49,7 +49,7 @@ def release_gate(protocol, set_rows, run, calibration, ref_run=None, p95_ms=None
 
     규약에 있는 칸만 잰다 — g1 은 절대 자(acc3_min · unsure_max · d_*), g2 는 vs_ref 목록 · unsure_vs_ref_max_diff.
     g3 는 b_recall_min · vs_ref 항목에 거름 칸(lang · domain)을 달 수 있다 — 자 이름 b_recall@ko · vs_ref_b_recall@ko.
-    g4 는 min_groups 가 모자라면 자를 재기 전에 거부한다.
+    g4 는 min_groups 가 모자라면 자를 재기 전에 거부한다. g9 는 vs_ref 가 F1 자 (vs_ref_rows).
     """
     gate = protocol["release_gate"]
     table = cmp.pair_hits([run], list(set_rows))
@@ -145,7 +145,9 @@ def vs_ref_specs(gate):
 
 
 def vs_ref_rows(protocol, set_rows, table, ref_run):
-    """기준 모델 견줌 — 지표마다 같은 쌍 차의 묶음 붓스트랩 아래끝 · McNemar(보고)."""
+    """기준 모델 견줌 — 지표마다 같은 쌍 차의 묶음 붓스트랩 아래끝 · McNemar(보고).
+
+    g9 는 짝 비교 지킴과 같은 F1 자(칸별 F1 · macro-F1)를 쓴다 — 셈은 compare.f1_compare 그대로 (씨앗 수가 달라도 혼동표 셈)."""
     specs = vs_ref_specs(protocol["release_gate"])
     ref = None
     groups = None
@@ -157,6 +159,8 @@ def vs_ref_rows(protocol, set_rows, table, ref_run):
     boot = protocol.get("bootstrap", {})
     rows = []
     for spec in specs:
+        # drop_forms 가 달린 자는 짝 비교처럼 그 꼴의 쌍을 빼고 센다 (with_drop 없이 넘기면 조용히 다 센다)
+        spec = cmp.with_drop(protocol, spec)
         metric = spec["metric"]
         name = f"vs_ref_{cmp.ruler_name(spec)}"
         if "ci_low_gt" in spec:
@@ -169,7 +173,7 @@ def vs_ref_rows(protocol, set_rows, table, ref_run):
         if cmp.is_f1(metric):
             # g9 꼴 F1 자 — 뽑기마다 혼동표를 다시 세는 셈 (짝 비교와 같은 함수, 거름 칸도 같이 본다)
             s = cmp.f1_compare(protocol, set_rows, ref, table, [spec])[cmp.ruler_name(spec)]
-        elif cmp.is_slice(spec):
+        elif cmp.is_slice(spec) or spec.get("_drop"):
             # g3 꼴 {"metric": "b_recall", "lang": "ko", …} — 걸러진 쌍만으로 같은 셈 (짝 비교와 같은 함수)
             s = cmp.slice_compare(protocol, set_rows, ref, table, spec)
         else:

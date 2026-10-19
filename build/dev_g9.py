@@ -1,9 +1,14 @@
-"""dev_g9 — dev-cmp-g9 재료 만들기 (K7 설계 1-2 · 4-1 2단계). 학습 · 라벨 · 셋 얼리기는 안 한다.
+"""dev_g9 — dev-cmp-g9 재료 만들기와 얼리기 (K7 설계 1-2 · 4-1 2단계 · 4단계). 학습 · 라벨 판정은 안 한다.
 
     python -I dev_g9.py trim  [--root ~/.judgemodel] [--work ~/.judgemodel/work-g9]
     python -I dev_g9.py pick  [--root …] [--work …] [--pool 원천=파일 …] [--seed 20261801]
     python -I dev_g9.py check [--root …] [--work …]
     python -I dev_g9.py blind [--root …] [--work …] [--seed 20261802] [--size 100]
+
+얼리기 (4단계, 라벨 판 · merge_g9 final 뒤) — 출력은 git 밖 `~/.judgemodel/sets/g9/` :
+    python -I dev_g9.py assemble  [--root …] [--work …] [--dest ~/.judgemodel/sets/g9] [--seed 20261803]
+    python -I dev_g9.py check-set [--root …] [--dest …]
+    python -I dev_g9.py freeze    [--dest …]
 
 보충 판(앞 후보를 그대로 두고 더 뽑기) — 이름 · 피할 후보 · 묶음 시작 번호를 따로 준다 :
     python -I dev_g9.py pick  --name cands-g9-ko-extra --avoid cands-g9-ko --pools-only --pool 원천=파일 …
@@ -16,6 +21,12 @@
           본문(id · src · form · evidence · claim)과 힌트(hint · 묶음 · 출처 id)를 다른 파일에 쓴다.
 - check : 후보 ↔ 학습 층 · dev-cmp-g4 · blind-g4 열쇠 겹침을 다시 센다(pick 과 따로 읽음). 0 이 아니면 exit 1.
 - blind : 후보 + v6 재라벨 대상을 섞어 라벨러용 묶음(bid · evidence · claim)과 되돌리는 표를 쓴다.
+- assemble : dev-cmp-g4 에서 빼기 쌍을 빼고, v5 쌍의 want 를 최종 라벨(labels-g9-final.jsonl)로 바꾸고,
+          new-ko 최종 라벨에서 칸 몫(NEW_QUOTA)만큼 씨앗 고정으로 고른다 → dev-cmp-g9.jsonl + .summary.json.
+          칸 안은 원천마다 고르게(b 는 B_SHARE 비), 원천 안은 생성기 꼴이 아닌 쌍 먼저. 모자란 칸은 있는 만큼만.
+          보충 판(LABEL_ONLY)은 그 판의 칸만 풀에 넣는다 — 앞서 얼린 a · b · c 고르기가 같은 씨앗으로 그대로 남게.
+- check-set : 조립한 셋 ↔ 학습 층 · blind-g4 열쇠 겹침(새 줄은 dev-cmp-g4 와도) · 셋 안 글 겹침. 0 아니면 exit 1.
+- freeze : assemble_g3 와 같은 길(train/freeze.py write → check)로 FROZEN-dev-cmp-g9.sha256 을 쓴다.
 
 blind-g4 는 `blind-g4.forbid.json`(열쇠 목록)만 읽고 본문 파일은 열지 않는다. 출력은 모두 git 밖 work 폴더에 쓴다.
 생성기 꼴(near-x · removed 등)은 후보에 넣지 않는다(설계 1-2 · 1-3). 보충 판의 `--allow-form near-x` 만 예외다 —
@@ -75,6 +86,19 @@ BID_SALT = "g9-blind-v1:"
 CAND_NAME = "cands-g9-ko"
 CAND_FILE = CAND_NAME + ".jsonl"
 HINT_FILE = CAND_NAME + ".hints.jsonl"
+# 얼리기 (4단계)
+G9_SET = "dev-cmp-g9"
+G9_DEST = "sets/g9"
+FINAL_LABELS = "labels/labels-g9-final.jsonl"
+CAND_NAMES = (CAND_NAME, "cands-g9-ko-extra", "cands-g9-ko-extra2")   # 새 줄 본문 · 힌트를 찾는 후보 파일 (본판 · 보충 판 둘)
+NEW_QUOTA = {"b": 300, "a": 250, "c": 200, "d": 250}   # 설계 1-2 칸 몫
+# 칸을 채우려고 뒤에 더한 보충 판 → 그 판에서 쓰는 칸. 다른 칸 줄은 풀에 안 넣는다 —
+# 그래야 앞서 얼린 셋의 a · b · c 고르기(같은 씨앗)가 그대로고 모자란 칸만 는다 (10-18 d 보충)
+LABEL_ONLY = {"cands-g9-ko-extra2": ("d",)}
+ASSEMBLE_SEED = 20261803
+GUIDE = "support-v6"
+STATUS_OF = {"2": "agree", "3": "third", "split3": "split3"}
+PROTOCOL_G9 = os.path.join(HERE, "..", "measure", "protocol-g9.json")
 
 
 def cand_paths(work, name=CAND_NAME):
@@ -93,6 +117,14 @@ def merged_rows(work, name):
         row.setdefault("lang", "ko")
         out.append(row)
     return out
+
+
+def avoid_rows(work, spec):
+    """--avoid 값(쉼표로 여러 이름) → {"cands-g9": 앞 판 후보 줄 전부} 또는 None."""
+    names = [n.strip() for n in (spec or "").split(",") if n.strip()]
+    if not names:
+        return None
+    return {"cands-g9": [r for n in names for r in merged_rows(work, n)]}
 
 
 def _p(root, rel):
@@ -356,7 +388,7 @@ def pick_main(args):
     forbid, _ = ms._g4_forbid(argparse.Namespace(old_root=root, g1_build=None, use1=None, ruler_ids=None,
                                                  g2_build=None, g3_build=None, seed_forbid=None))
     print("forbid loaded", file=sys.stderr, flush=True)
-    avoid = {"cands-g9": merged_rows(work, args.avoid)} if args.avoid else None
+    avoid = avoid_rows(work, args.avoid)
     g4marks, miss2 = load_marks(root, avoid=avoid)
     print("marks loaded", file=sys.stderr, flush=True)
     missing += list(forbid.missing) + miss2
@@ -438,7 +470,7 @@ def check(cands, hints, marks):
 def check_main(args):
     root = os.path.expanduser(args.root)
     work = os.path.expanduser(args.work)
-    avoid = {"cands-g9": merged_rows(work, args.avoid)} if args.avoid else None
+    avoid = avoid_rows(work, args.avoid)
     marks, missing = load_marks(root, with_reserve=True, avoid=avoid)
     if missing:
         print(json.dumps({"missing": missing}, ensure_ascii=False))
@@ -519,20 +551,316 @@ def blind_main(args):
     return 0
 
 
+# ---------------------------------------------------------------- assemble (얼리기)
+
+
+def spread(total, avail, weights=None):
+    """칸 몫 total 을 원천에 나눈다 → {원천: 수}. weights 비(없으면 고르게)로 큰 나머지 나눔을 하고,
+    풀이 모자란 원천의 남는 몫은 아직 남은 원천에 같은 비로 다시 나눈다(다 모자라면 있는 만큼)."""
+    keys = sorted(avail)
+    weights = weights or {k: 1 for k in keys}
+    got = {k: 0 for k in keys}
+    while True:
+        left = total - sum(got.values())
+        open_ = {k: weights.get(k, 0) for k in keys if got[k] < avail[k] and weights.get(k, 0) > 0}
+        if left <= 0 or not open_:
+            return got
+        share = ms._largest_remainder(left, open_)
+        moved = 0
+        for k, n in share.items():
+            add = min(n, avail[k] - got[k])
+            got[k] += add
+            moved += add
+        if not moved:
+            return got
+
+
+def _votes(f):
+    out = {"j1": f["l1"], "j2": f["l2"]}
+    if f.get("l3"):
+        out["j3"] = f["l3"]
+    return out
+
+
+def _old_part(dev_rows, drop, v5, finals):
+    """옛 dev-cmp-g4 줄 → (g9 줄, 셈). drop 은 빼고 v5 쌍은 최종 라벨로 다시 단다."""
+    ids = {r["id"] for r in dev_rows}
+    if set(drop) - ids:
+        raise ValueError(f"빼기 id 중 dev-cmp-g4 에 없는 것 {len(set(drop) - ids)}개")
+    if set(v5) - ids or set(v5) & set(drop):
+        raise ValueError("v5 id 가 dev-cmp-g4 에 없거나 빼기 목록과 겹친다")
+    old_final = {f["id"]: f for f in finals if f.get("set") == "old-dev"}
+    if set(old_final) != set(v5):
+        raise ValueError(f"old-dev 최종 라벨 {len(old_final)}쌍과 v5 목록 {len(v5)}쌍이 같지 않다")
+    gone, redo = set(drop), set(v5)
+    rows, changed = [], collections.Counter()
+    for r in dev_rows:
+        if r["id"] in gone:
+            continue
+        out = dict(r, set=G9_SET, g4_set=r.get("set"))
+        if r["id"] in redo:
+            f = old_final[r["id"]]
+            out.update(g4_want=r["want"], g4_guide=r.get("label_guide"), want=f["label"], label_guide=GUIDE,
+                       votes=_votes(f), status=STATUS_OF[f["agree"]], g9_label="v6-relabel")
+            if f["label"] != r["want"]:
+                changed[f"{r['want']}>{f['label']}"] += 1
+        else:
+            if r.get("label_guide") != GUIDE:
+                raise ValueError(f"재라벨 대상이 아닌데 기준이 {r.get('label_guide')} 다 ({r['id']})")
+            out["g9_label"] = "g4-carry"
+        rows.append(out)
+    rep = {"pairs_in": len(dev_rows), "dropped": len(drop), "kept": len(rows), "relabeled": len(v5),
+           "changed": sum(changed.values()), "changed_by": dict(sorted(changed.items()))}
+    return rows, rep
+
+
+def _new_row(f, c):
+    """최종 라벨 줄 + 후보 본문 · 힌트 → dev-cmp-g4 새 줄(v6-new)과 같은 꼴."""
+    return {"id": c["id"], "evidence": c["evidence"], "claim": c["claim"], "want": f["label"],
+            "hint": c.get("hint"), "form": c.get("form"), "domain": c["src"], "group": c.get("group"),
+            "groups": c.get("groups") or [c.get("group")], "lang": c.get("lang", "ko"), "lic": c.get("lic", ""),
+            "split": c.get("split"), "src_ids": c.get("src_ids") or [], "origin": c.get("origin"),
+            "orig_id": c.get("orig_id"), "label_guide": GUIDE, "votes": _votes(f),
+            "status": STATUS_OF[f["agree"]], "set": G9_SET, "g9_label": "v6-new"}
+
+
+def _new_part(finals, cands, quota, seed, label_only=None):
+    """new-ko 최종 라벨에서 칸 몫만큼 고르기 → (g9 줄, 셈). 칸은 이름 차례, 원천도 이름 차례로 같은 rng 를 쓴다.
+    label_only = {후보 파일 이름: 쓰는 칸} — 그 파일 줄 중 다른 칸은 풀에서 뺀다(cands 줄의 cand_file 로 가린다)."""
+    label_only = LABEL_ONLY if label_only is None else label_only
+    news = [f for f in finals if f.get("set") == "new-ko"]
+    missing = [f["id"] for f in news if f["id"] not in cands]
+    if missing:
+        raise ValueError(f"new-ko 최종 라벨 중 후보 파일에 없는 id {len(missing)}개")
+    unused = collections.Counter()
+    for f in news:
+        name = cands[f["id"]].get("cand_file")
+        if name in label_only and f["label"] not in label_only[name]:
+            unused[f"{name}:{f['label']}"] += 1
+    news = [f for f in news if not (cands[f["id"]].get("cand_file") in label_only
+                                    and f["label"] not in label_only[cands[f["id"]]["cand_file"]])]
+    bad = [f["id"] for f in news if f["label"] not in NEW_QUOTA]
+    if bad:
+        raise ValueError(f"모르는 라벨 {len(bad)}개")
+    rng = random.Random(seed)
+    picked, rep = [], {"pool": {}, "quota": dict(quota), "picked": {}, "shortfall": {}, "by_src": {}}
+    for label in sorted(quota):
+        pool = collections.defaultdict(list)
+        for f in sorted((f for f in news if f["label"] == label), key=lambda f: f["id"]):
+            pool[cands[f["id"]]["src"]].append(f)
+        avail = {s: len(v) for s, v in pool.items()}
+        if label == "b" and set(avail) - set(B_SHARE):
+            raise ValueError(f"b 몫(B_SHARE)에 없는 원천 {sorted(set(avail) - set(B_SHARE))}")
+        plan = spread(quota[label], avail, B_SHARE if label == "b" else None) if avail else {}
+        took = 0
+        for src in sorted(plan):
+            plain = [f for f in pool[src] if cands[f["id"]].get("form") not in GENERATOR_FORMS]
+            gen = [f for f in pool[src] if cands[f["id"]].get("form") in GENERATOR_FORMS]
+            rng.shuffle(plain)
+            rng.shuffle(gen)
+            chosen = (plain + gen)[:plan[src]]
+            picked += [_new_row(f, cands[f["id"]]) for f in chosen]
+            took += len(chosen)
+        rep["pool"][label] = sum(avail.values())
+        rep["picked"][label] = took
+        rep["by_src"][label] = {s: plan[s] for s in sorted(plan)}
+        if took < quota[label]:
+            rep["shortfall"][label] = quota[label] - took
+    if unused:
+        rep["label_only_unused"] = dict(sorted(unused.items()))
+    picked.sort(key=lambda r: r["id"])
+    return picked, rep
+
+
+def assemble(dev_rows, drop, v5, finals, cands, quota=None, seed=ASSEMBLE_SEED, label_only=None):
+    """dev-cmp-g9 줄 목록과 셈. cands = {id: 후보 본문 + 힌트}. 옛 줄(옛 차례) 다음에 새 줄(id 차례)."""
+    # 최종 라벨 줄의 꼴을 먼저 본다 — 옛 줄 쪽에서 KeyError 로 죽지 않고 exit 2 로 멈추게
+    bad = [f.get("id") for f in finals if f.get("label") not in NEW_QUOTA or f.get("agree") not in STATUS_OF]
+    if bad:
+        raise ValueError(f"최종 라벨 줄 중 label · agree 가 모르는 값인 것 {len(bad)}개 (첫 id {bad[0]})")
+    ids = [f.get("id") for f in finals]
+    if len(set(ids)) != len(ids):
+        raise ValueError("최종 라벨 id 가 겹친다")
+    old, old_rep = _old_part(dev_rows, drop, v5, finals)
+    new, new_rep = _new_part(finals, cands, quota or NEW_QUOTA, seed, label_only)
+    rows = old + new
+    if len({r["id"] for r in rows}) != len(rows):
+        raise ValueError("dev-cmp-g9 id 가 겹친다")
+    return rows, {"seed": seed, "old": old_rep, "new": new_rep}
+
+
+def gen_counts(rows, forms):
+    """규약 generator_forms_counts 꼴 — near-x · removed 는 전체와 @ko, 나머지 생성기 꼴은 others 하나로."""
+    out = {"near-x": 0, "near-x@ko": 0, "removed": 0, "removed@ko": 0, "others": 0}
+    for r in rows:
+        form = r.get("form")
+        if form in ("near-x", "removed"):
+            out[form] += 1
+            out[form + "@ko"] += r.get("lang") == "ko"
+        elif form in forms:
+            out["others"] += 1
+    return out
+
+
+def set_summary(rows, rep, sha, forms):
+    def by(key):
+        table = collections.defaultdict(collections.Counter)
+        for r in rows:
+            table[str(r.get(key))][r["want"]] += 1
+        return {k: dict(sorted(v.items())) for k, v in sorted(table.items())}
+
+    return {"set": G9_SET, "draft": False, "pairs": len(rows), "sha256": sha,
+            "want": dict(sorted(collections.Counter(r["want"] for r in rows).items())),
+            "lang_want": by("lang"), "domain_want": by("domain"),
+            "form": dict(collections.Counter(str(r.get("form")) for r in rows).most_common()),
+            "g9_label": dict(sorted(collections.Counter(r["g9_label"] for r in rows).items())),
+            "generator_forms_counts": gen_counts(rows, forms), **rep}
+
+
+def load_cands(work, names=CAND_NAMES):
+    """후보 본문 + 힌트 → {id: 줄}. 파일 사이 id 가 겹치면 멈춘다."""
+    out = {}
+    for name in names:
+        for row in merged_rows(work, name):
+            if row["id"] in out:
+                raise ValueError(f"후보 id 가 파일 사이에 겹친다 ({name})")
+            out[row["id"]] = dict(row, cand_file=name)   # LABEL_ONLY 가리기용 — _new_row 는 안 옮긴다
+    return out
+
+
+def _read_ids(path):
+    with open(path, encoding="utf-8") as f:
+        return [line.strip() for line in f if line.strip()]
+
+
+def _protocol_forms():
+    with open(PROTOCOL_G9, encoding="utf-8") as f:
+        return set(json.load(f).get("generator_forms") or [])
+
+
+def assemble_main(args):
+    root = os.path.expanduser(args.root)
+    work = os.path.expanduser(args.work)
+    dest = os.path.expanduser(args.dest or _p(root, G9_DEST))
+    if ms._inside_git(dest):
+        print(json.dumps({"stop": "dest 폴더가 git 안이다"}, ensure_ascii=False))
+        return 2
+    if os.path.exists(os.path.join(dest, f"FROZEN-{G9_SET}.sha256")):
+        print(json.dumps({"stop": "이미 얼린 셋이다 — 다시 조립하지 않는다", "dest": dest}, ensure_ascii=False))
+        return 2
+    dev_path = _p(root, DEV)
+    if _sha_file(dev_path) != DEV_SHA:
+        print(json.dumps({"stop": "dev-cmp-g4 sha 가 얼린 값과 다르다"}, ensure_ascii=False))
+        return 2
+    try:
+        rows, rep = assemble(ms.read_jsonl(dev_path), _read_ids(os.path.join(work, "dev-g4-drop.ids.txt")),
+                             _read_ids(os.path.join(work, "dev-g4-v5.ids.txt")),
+                             ms.read_jsonl(os.path.join(work, *FINAL_LABELS.split("/"))), load_cands(work),
+                             seed=args.seed)
+    except ValueError as e:
+        print(json.dumps({"stop": str(e)}, ensure_ascii=False))
+        return 2
+    path = os.path.join(dest, G9_SET + ".jsonl")
+    _write_jsonl(path, rows)
+    summary = set_summary(rows, rep, _sha_file(path), _protocol_forms())
+    with open(os.path.join(dest, G9_SET + ".summary.json"), "w", encoding="utf-8", newline="\n") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=1)
+    print(json.dumps({k: summary[k] for k in ("pairs", "sha256", "want", "lang_want", "g9_label",
+                                              "generator_forms_counts", "old", "new")}, ensure_ascii=False, indent=1))
+    return 0
+
+
+def check_set(rows, marks):
+    """조립한 셋 ↔ Marks 겹침 셈. 옛 줄(g9_label ≠ v6-new)은 dev-cmp-g4 에서 왔으니 그 Marks 는 건너뛴다.
+    셋 안 글 겹침(text_within)도 센다."""
+    counts, keys = collections.Counter(), set()
+    for row in rows:
+        for name, m in marks.items():
+            if name == "dev-cmp-g4" and row.get("g9_label") != "v6-new":
+                continue
+            for why in m.reasons(row):
+                counts[f"{why}_{name}"] += 1
+        both = ms._both_keys(row)
+        if both & keys:
+            counts["text_within"] += 1
+        keys |= both
+    names = [f"{w}_{n}" for n in marks for w in ("group", "src", "text", "sha", "para")] + ["text_within"]
+    return {k: counts.get(k, 0) for k in names}
+
+
+def old_is_soft(key):
+    """옛 줄의 물려받은 겹침 — 막지 않고 보고만. 문단 겹침(trim 규칙 밖)과 K7 처방 밖 학습 층 겹침."""
+    return key.startswith("para_") or key.endswith("_other-train")
+
+
+def judge_check(new_out, old_out):
+    """(막는 수, 보고만 수). 새 줄은 모두 막고, 옛 줄은 old_is_soft 만 보고만."""
+    block = sum(new_out.values()) + sum(v for k, v in old_out.items() if not old_is_soft(k))
+    return block, sum(v for k, v in old_out.items() if old_is_soft(k))
+
+
+def old_marks(root):
+    """옛 줄용 Marks — K7 처방 층 · 처방 밖 층 · blind-g4 열쇠(forbid 만). reserve-g4 예약은 dev-cmp-g4 자기 몫이
+    들어 있어(124쌍) 옛 줄에는 쓰지 않는다."""
+    marks = {"recipe": Marks(), "other-train": Marks(), "blind-g4": Marks()}
+    for name, layers in (("recipe", RECIPE_LAYERS), ("other-train", OTHER_LAYERS)):
+        for rel in layers.values():
+            marks[name].add_rows(ms.read_jsonl(_p(root, rel)), name)
+    with open(_p(root, BLIND_FORBID), encoding="utf-8") as f:
+        marks["blind-g4"].add_forbid(json.load(f))
+    return marks
+
+
+def check_set_main(args):
+    root = os.path.expanduser(args.root)
+    dest = os.path.expanduser(args.dest or _p(root, G9_DEST))
+    marks, missing = load_marks(root, with_reserve=True)
+    if missing:
+        print(json.dumps({"missing": missing}, ensure_ascii=False))
+        return 2
+    rows = ms.read_jsonl(os.path.join(dest, G9_SET + ".jsonl"))
+    new_rows = [r for r in rows if r.get("g9_label") == "v6-new"]
+    new_out = check_set(new_rows, marks)
+    old_out = check_set([r for r in rows if r.get("g9_label") != "v6-new"], old_marks(root))
+    within = check_set(rows, {})["text_within"]
+    for out in (new_out, old_out):
+        out.pop("text_within")                       # 셋 안 글 겹침은 셋 전체로 한 번만 센다
+    block, soft = judge_check(new_out, old_out)
+    block += within
+    doc = {"set": G9_SET, "pairs": len(rows), "new": new_out, "old": old_out, "text_within_all": within,
+           "old_soft": {k: v for k, v in old_out.items() if v and old_is_soft(k)},
+           "soft_note": "옛 줄(얼린 dev-cmp-g4 에서 온 줄)의 문단 겹침 · K7 처방 밖 층 겹침은 막지 않고 보고만",
+           "total": block, "soft": soft}
+    with open(os.path.join(dest, f"check-{G9_SET}.json"), "w", encoding="utf-8", newline="\n") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=1)
+    print(json.dumps(doc, ensure_ascii=False, indent=1))
+    return 1 if doc["total"] else 0
+
+
+def freeze_main(args):
+    from assemble_g3 import cmd_freeze   # build/ 안 모듈 — 얼릴 때만 부른다
+    dest = os.path.expanduser(args.dest or _p(os.path.expanduser(args.root), G9_DEST))
+    return cmd_freeze(argparse.Namespace(dest=dest, set=G9_SET))
+
+
 def main(argv=None):
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     home = os.path.join(os.path.expanduser("~"), ".judgemodel")
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("trim", "pick", "check", "blind"):
+    for name in ("trim", "pick", "check", "blind", "assemble", "check-set", "freeze"):
         p = sub.add_parser(name)
         p.add_argument("--root", default=home)
         p.add_argument("--work", default=os.path.join(home, "work-g9"))
+        if name in ("assemble", "check-set", "freeze"):
+            p.add_argument("--dest", help="셋 폴더 (기본 <root>/sets/g9)")
+        if name == "assemble":
+            p.add_argument("--seed", type=int, default=ASSEMBLE_SEED)
         if name in ("pick", "check", "blind"):
             p.add_argument("--name", default=CAND_NAME, help="후보 파일 이름 앞부분 (work 폴더 안)")
         if name in ("pick", "check"):
-            p.add_argument("--avoid", help="이 이름의 앞 판 후보와도 겹치지 않게 (본문 + 힌트를 같이 읽는다)")
+            p.add_argument("--avoid", help="이 이름의 앞 판 후보와도 겹치지 않게 (쉼표로 여럿, 본문 + 힌트를 같이 읽는다)")
         if name == "pick":
             p.add_argument("--pool", action="append", help="원천=파일 (그 원천 풀에 더한다)")
             p.add_argument("--seed", type=int, default=PICK_SEED)
@@ -546,7 +874,8 @@ def main(argv=None):
             p.add_argument("--no-old", action="store_true", help="v5 재라벨 대상(옛 dev 줄)을 섞지 않는다")
             p.add_argument("--map", default="g9-blind-map.jsonl", help="되돌리는 표 파일 이름")
     args = ap.parse_args(argv)
-    return {"trim": trim_main, "pick": pick_main, "check": check_main, "blind": blind_main}[args.cmd](args)
+    return {"trim": trim_main, "pick": pick_main, "check": check_main, "blind": blind_main, "assemble": assemble_main,
+            "check-set": check_set_main, "freeze": freeze_main}[args.cmd](args)
 
 
 if __name__ == "__main__":

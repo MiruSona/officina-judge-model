@@ -93,5 +93,150 @@ class ExtraTest(unittest.TestCase):
         self.assertEqual(sorted(r["id"] for r in got), ["r1", "r2"])
 
 
+def final(rid, label, set_name="new-ko", form="qa-true", l1=None, l2=None, l3=None, agree="2"):
+    return {"id": rid, "bid": "b" + rid, "form": form, "set": set_name, "label": label,
+            "l1": l1 or label, "l2": l2 or label, "l3": l3, "agree": agree}
+
+
+def cand(rid, src, form="qa-true"):
+    return {"id": rid, "src": src, "form": form, "evidence": f"근거 {rid}", "claim": f"주장 {rid}",
+            "hint": "a", "group": f"n:{rid}", "groups": [f"n:{rid}"], "src_ids": [f"s:{rid}"], "lang": "ko",
+            "lic": "CC-BY-SA-4.0", "orig_id": "o-" + rid, "split": "train", "origin": "g3-x"}
+
+
+class SpreadTest(unittest.TestCase):
+    """칸 몫을 원천에 나누기 — 고르게(또는 비대로), 모자란 원천 몫은 남은 원천에 다시 나눈다."""
+
+    def test_even_with_shortage(self):
+        got = dev_g9.spread(250, {"ka": 204, "mrc": 45, "boolq": 362, "wiki": 21})
+        self.assertEqual(sum(got.values()), 250)
+        self.assertEqual((got["wiki"], got["mrc"]), (21, 45))
+        self.assertEqual(sorted((got["ka"], got["boolq"])), [92, 92])
+
+    def test_weights_and_short_pool(self):
+        got = dev_g9.spread(300, {"wiki": 149, "boolq": 157, "ka": 86, "mrc": 82},
+                            {"wiki": 100, "boolq": 100, "ka": 60, "mrc": 40})
+        self.assertEqual(got, {"wiki": 100, "boolq": 100, "ka": 60, "mrc": 40})
+        self.assertEqual(dev_g9.spread(250, {"x": 100, "y": 27}), {"x": 100, "y": 27})   # 다 모자라면 있는 만큼
+
+
+class AssembleTest(unittest.TestCase):
+    """dev-cmp-g9 조립 — drop 빼기 · v5 라벨 교체 · 칸 몫 고르기 · form 보존 · 줄 꼴 · 결정성."""
+
+    def setUp(self):
+        self.dev = [dict(row("d1", "g:1", "support-v5", want="b"), form="near", set="dev-cmp-g4"),
+                    dict(row("d2", "g:2", "support-v5", want="c"), form="same-doc", set="dev-cmp-g4"),
+                    dict(row("d3", "g:3", want="d"), form="near-x", set="dev-cmp-g4"),
+                    dict(row("d4", "g:4", want="a"), form="labeled", set="dev-cmp-g4")]
+        self.drop, self.v5 = ["d4"], ["d1", "d2"]
+        self.cands = {}
+        finals = [final("d1", "a", "old-dev", form="near", l1="a", l2="b", l3="a", agree="3"),
+                  final("d2", "c", "old-dev", form="same-doc")]
+        n = 0
+        for label, src, k, form in (("b", "kowiki", 4, "wiki-edit"), ("b", "klue-mrc", 3, "qa-alt"),
+                                    ("a", "klue-answered", 3, "qa-true"), ("c", "kowiki", 2, "near-x"),
+                                    ("c", "klue-answered", 1, "qa-true"), ("d", "klue-mrc", 1, "unanswerable")):
+            for _ in range(k):
+                rid = f"g9n-{n:04d}"
+                n += 1
+                self.cands[rid] = cand(rid, src, form)
+                finals.append(final(rid, label, form=form))
+        self.finals = finals
+        self.quota = {"b": 4, "a": 2, "c": 2, "d": 2}
+
+    def build(self, seed=5):
+        return dev_g9.assemble(self.dev, self.drop, self.v5, self.finals, self.cands, self.quota, seed=seed)
+
+    def test_drop_relabel_and_carry(self):
+        rows, rep = self.build()
+        ids = [r["id"] for r in rows]
+        self.assertNotIn("d4", ids)
+        self.assertEqual(ids[:3], ["d1", "d2", "d3"])          # 옛 줄은 옛 차례 그대로 앞에
+        d1, d2, d3 = rows[:3]
+        self.assertEqual((d1["want"], d1["g4_want"], d1["label_guide"], d1["g9_label"]), ("a", "b", "support-v6", "v6-relabel"))
+        self.assertEqual((d1["votes"], d1["status"]), ({"j1": "a", "j2": "b", "j3": "a"}, "third"))
+        self.assertEqual(d1["form"], "near")                   # form 은 옛 줄 그대로
+        self.assertEqual((d3["want"], d3["g9_label"], d3["label_guide"]), ("d", "g4-carry", "support-v6"))
+        self.assertNotIn("g4_want", d3)
+        self.assertTrue(all(r["set"] == "dev-cmp-g9" for r in rows))
+        self.assertEqual(d3["g4_set"], "dev-cmp-g4")
+        self.assertEqual((rep["old"]["dropped"], rep["old"]["relabeled"], rep["old"]["changed"]), (1, 2, 1))
+
+    def test_quota_and_new_row_shape(self):
+        rows, rep = self.build()
+        new = [r for r in rows if r["g9_label"] == "v6-new"]
+        counts = dev_g9.collections.Counter(r["want"] for r in new)
+        self.assertEqual(dict(counts), {"b": 4, "a": 2, "c": 2, "d": 1})   # d 는 1 뿐이라 있는 만큼
+        self.assertEqual(rep["new"]["shortfall"], {"d": 1})
+        by_src = dev_g9.collections.Counter(r["domain"] for r in new if r["want"] == "b")
+        self.assertEqual(dict(by_src), {"kowiki": 3, "klue-mrc": 1})       # b 는 B_SHARE 비(100:40)
+        c_src = dev_g9.collections.Counter(r["domain"] for r in new if r["want"] == "c")
+        self.assertEqual(dict(c_src), {"kowiki": 1, "klue-answered": 1})  # 나머지 칸은 원천마다 고르게
+        c_forms = sorted(r["form"] for r in new if r["want"] == "c")
+        self.assertIn("qa-true", c_forms)                                   # 생성기 꼴 아닌 쌍 먼저
+        r = new[0]
+        for key in ("id", "evidence", "claim", "want", "form", "domain", "group", "groups", "lang", "label_guide",
+                    "src_ids", "votes", "status", "set"):
+            self.assertIn(key, r)
+        self.assertEqual((r["label_guide"], r["lang"]), ("support-v6", "ko"))
+        self.assertEqual(r["form"], self.cands[r["id"]]["form"])
+        self.assertEqual([x["id"] for x in new], sorted(x["id"] for x in new))
+
+    def test_deterministic_seed(self):
+        a, _ = self.build(seed=5)
+        b, _ = self.build(seed=5)
+        self.assertEqual(a, b)
+        picks = {tuple(r["id"] for r in self.build(seed=s)[0]) for s in range(1, 12)}
+        self.assertGreater(len(picks), 1)                                   # 씨앗이 고르기를 바꾼다
+
+    def test_label_only_supplement_keeps_other_picks(self):
+        base, _ = self.build(seed=5)
+        cands, finals = dict(self.cands), list(self.finals)
+        for i, label in enumerate(("a", "b", "d", "d")):                   # 보충 판 : a · b 는 안 쓰고 d 만
+            rid = f"g9x-{i:04d}"
+            cands[rid] = dict(cand(rid, "kowiki", "wiki-edit"), cand_file="extra")
+            finals.append(final(rid, label, form="wiki-edit"))
+        rows, rep = dev_g9.assemble(self.dev, self.drop, self.v5, finals, cands, self.quota, seed=5,
+                                    label_only={"extra": ("d",)})
+        self.assertEqual(rep["new"]["label_only_unused"], {"extra:a": 1, "extra:b": 1})
+        added = [r for r in rows if r["id"] not in {x["id"] for x in base}]
+        self.assertEqual(sorted(r["want"] for r in added), ["d"])          # d 몫 2 중 빈 1 만 채운다
+        self.assertEqual([r for r in rows if r["want"] != "d"], [r for r in base if r["want"] != "d"])
+        self.assertNotIn("cand_file", added[0])
+
+    def test_refuses_bad_inputs(self):
+        with self.assertRaises(ValueError):                                 # v5 인데 최종 라벨이 없다
+            dev_g9.assemble(self.dev, self.drop, self.v5 + ["d3"], self.finals, self.cands, self.quota)
+        with self.assertRaises(ValueError):                                 # 새 줄 id 가 후보 파일에 없다
+            dev_g9.assemble(self.dev, self.drop, self.v5, self.finals + [final("g9n-zzzz", "a")], self.cands,
+                            self.quota)
+        with self.assertRaises(ValueError):                                 # drop 이 dev 에 없다
+            dev_g9.assemble(self.dev, ["nope"], self.v5, self.finals, self.cands, self.quota)
+
+
+class CheckSetTest(unittest.TestCase):
+    def test_old_rows_skip_old_dev_marks_new_rows_do_not(self):
+        marks = {"train": dev_g9.Marks(), "dev-cmp-g4": dev_g9.Marks(), "blind-g4": dev_g9.Marks()}
+        old = dict(row("d1", "g:1", ev="옛 근거", cl="옛 주장"), g9_label="g4-carry")
+        marks["dev-cmp-g4"].add_rows([old], "dev")
+        clean_new = dict(row("n1", "g:9", ev="새 근거", cl="새 주장"), g9_label="v6-new")
+        out = dev_g9.check_set([old, clean_new], marks)
+        self.assertEqual(sum(out.values()), 0)
+        bad_new = dict(row("n2", "g:1", ev="다른 근거", cl="다른 주장"), g9_label="v6-new")
+        out = dev_g9.check_set([old, bad_new], marks)
+        self.assertEqual(out["group_dev-cmp-g4"], 1)
+        dup = dict(old, id="d9")
+        self.assertEqual(dev_g9.check_set([old, dup], marks)["text_within"], 1)
+
+
+class JudgeCheckTest(unittest.TestCase):
+    def test_soft_only_for_old_para_and_other_layers(self):
+        new = {"group_train": 0, "para_train": 0}
+        old = {"group_recipe": 0, "para_recipe": 3, "group_other-train": 2, "group_blind-g4": 0}
+        self.assertEqual(dev_g9.judge_check(new, old), (0, 5))
+        self.assertEqual(dev_g9.judge_check(dict(new, para_train=1), old), (1, 5))     # 새 줄 문단 겹침은 막는다
+        self.assertEqual(dev_g9.judge_check(new, dict(old, group_recipe=1)), (1, 5))   # 옛 줄 처방 층 묶음은 막는다
+
+
 if __name__ == "__main__":
     unittest.main()
