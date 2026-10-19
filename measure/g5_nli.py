@@ -33,8 +33,7 @@ for _sub in (HERE, ROOT):
 from pairenc import encode_pair, pair_length  # noqa: E402
 from use_sites import common, harness  # noqa: E402  common 이 train/ · build/ 를 import 길에 넣는다
 from use_sites.sample import seen_keys  # noqa: E402
-from compare import mcnemar_exact  # noqa: E402
-from run_measure import pct  # noqa: E402
+from compare import mcnemar_exact, percentile  # noqa: E402
 
 KINDS = ("claim", "item")
 ARMS = ("raw", "cmp")
@@ -145,7 +144,7 @@ def summarize_arm(rows):
         out["mcnemar"][ruler] = {"all": pair_test(rows, ruler),
                                  "no_B2": pair_test([r for r in rows if r["tail"] != "B2"], ruler)}
     times = [r["rt_ms"] for r in rows if r.get("rt_ms") is not None]
-    out["p95_ms"] = round(pct(times, 0.95), 1) if times else None
+    out["p95_ms"] = round(percentile(sorted(times), 0.95), 1) if times else None
     out["failed"] = sum(1 for r in rows if r.get("error"))
     out["cut"] = sum(1 for r in rows if r["cut"])
     out["n"] = len(rows)

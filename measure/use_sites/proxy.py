@@ -77,8 +77,12 @@ class Proxy:
     def probe(self):
         """모델마다 /health 를 보고 쓸 수 있나 가른다. 이름이 기대와 다르면 못 쓴다 (다른 모델이 그 포트에 떠 있음)."""
         for name, url in self.models.items():
-            h = health(url)
-            if h is None:
+            try:
+                h = http_get_json(url + "/health")
+            except urllib.error.HTTPError as e:  # URLError 하위라 먼저 — 503 busy 를 unreachable 로 적지 않는다
+                self.status[name] = {"ok": False, "why": f"http {e.code}", "url": url}
+                continue
+            except (urllib.error.URLError, OSError, ValueError):
                 self.status[name] = {"ok": False, "why": "unreachable", "url": url}
                 continue
             want = self.expect.get(name)

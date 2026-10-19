@@ -175,6 +175,10 @@ def cmd_stop(a):
     h = proxy.health(f"http://127.0.0.1:{a.port}")
     if h is not None and h.get("name") != entry.get("name"):
         raise common.Refuse(f"{a.port} 에 떠 있는 것은 {h.get('name')} 다 (기록 {entry.get('name')}) — 다른 서버라 내리지 않는다")
+    if h is None:
+        # 안 답하면 재부팅 뒤 남의 pid 일 수도, 모델을 올리는 중일 수도 있다 — 죽이지도 기록을 지우지도 않는다
+        print(f"pid {entry['pid']} 은 답이 없다 — 직접 확인한 뒤 내린다 (포트 {a.port}, 기록은 남긴다)")
+        return
     try:
         os.kill(entry["pid"], signal.SIGTERM)
         print(f"내렸다 pid {entry['pid']} ({entry.get('name')}) 포트 {a.port}")

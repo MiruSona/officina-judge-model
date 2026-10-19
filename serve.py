@@ -7,7 +7,7 @@ SHA-256 앞 8자다. 이 응답 꼴이 클라이언트와의 약속이다. 기�
 `--compat3` 은 4칸 모델을 띄우되 d 를 c 에 더해 옛 3칸 꼴(`nli-v1`)로 답한다 — 판올림 전 손님용 물러설 길이다.
 
 1.1.0 opt-in (d 자료층 재구축 설계 6-1) : 요청에 `"label_set": "nli3" | "nli4"` 를 실으면 응답에 `labels` · `model_version` ·
-`label_set` 세 칸이 더 붙는다. 안 실으면 응답은 옛 꼴 그대로다(바이트까지). 3칸으로만 답할 수 있는 서버(3칸 모델 ·
+`label_set` · `truncated` 네 칸이 더 붙는다. 안 실으면 응답은 옛 꼴 그대로다(바이트까지). 3칸으로만 답할 수 있는 서버(3칸 모델 ·
 `--compat3`)는 `nli4` 요청에 3칸으로 답하고 `label_set: "nli3"` 을 싣는다 — 손님은 응답의 `label_set` 을 읽는다.
 모르는 `label_set` 은 400. `GET /info` 는 판 번호 · 칸 세트 · 라벨 이름을 알린다.
 
@@ -17,6 +17,7 @@ SHA-256 앞 8자다. 이 응답 꼴이 클라이언트와의 약속이다. 기�
 모델 폴더는 `--model` 또는 환경 변수 `JUDGEMODEL_MODEL_DIR` 로 준다. 둘 다 없으면 띄우지 않고 끝낸다.
 """
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -34,6 +35,7 @@ DEFAULT_PORT = 8092
 MAX_BODY = 1 << 20          # 1MB — 근거 한 덩이로 넉넉하다. 더 크면 413
 READ_TIMEOUT = 10           # 초 — 몸통을 덜 보내고 멈춘 손님이 스레드를 붙잡지 않게
 MODEL_ENV = "JUDGEMODEL_MODEL_DIR"   # --model 이 없을 때 읽는 모델 폴더 환경 변수
+BUSY_WAIT = 5               # 초 — 손님(Go) 시간 한도와 같다. 그보다 오래 줄 서면 손님은 이미 떠났다
 ALL_LETTERS = ["a", "b", "c", "d"]
 LETTERS_V1 = ALL_LETTERS[:3]
 # 응답 꼴 판 이름 — 칸 수로 정한다. model.json 의 protocol 이 있으면 그 값을 쓴다
@@ -87,6 +89,21 @@ def check_release_meta(spec, model_dir=""):
                          f"(기대 {want!r}, {model_dir})")
 
 
+def check_onnx_files(spec, model_dir):
+    """model.json 의 onnx 해시와 실제 파일이 다르면 멈춘다 — /health 의 model 은 model.json 만 보고 정해서다."""
+    pairs = [(spec.get("onnx_file", "model.onnx"), spec.get("onnx_sha256")),
+             (spec.get("onnx_data_file"), spec.get("onnx_data_sha256"))]
+    for name, want in pairs:
+        if not name or not want:
+            continue
+        h = hashlib.sha256()
+        with open(os.path.join(model_dir, name), "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                h.update(block)
+        if h.hexdigest() != want:
+            raise SystemExit(f"{name} 해시가 model.json 과 다르다 ({h.hexdigest()[:8]} ≠ {want[:8]}, {model_dir})")
+
+
 def spec_letters(spec, model_dir=""):
     """model.json 의 letters (없으면 옛 3칸). a·b·c(·d) 차례가 아니면 멈춘다 — 칸 차례는 손님과의 약속이다."""
     letters = spec.get("letters") or LETTERS_V1
@@ -103,6 +120,7 @@ class Compat3:
 
     def probs(self, evidence, claim):
         p = self.inner.probs(evidence, claim)
+        self.last_truncated = getattr(self.inner, "last_truncated", False)
         return [p[0], p[1], p[2] + p[3]]
 
 
@@ -142,7 +160,7 @@ class OnnxNLI:
                                             providers=["CPUExecutionProvider"])
 
     def logits(self, evidence, claim):
-        ids, _ = encode_pair(self.tokenizer, evidence, claim, self.max_len)
+        ids, self.last_truncated = encode_pair(self.tokenizer, evidence, claim, self.max_len)
         feeds = {"input_ids": self.np.array([ids], dtype=self.np.int64),
                  "attention_mask": self.np.ones((1, len(ids)), dtype=self.np.int64)}
         return [float(x) for x in self.session.run(["logits"], feeds)[0][0]]
@@ -167,7 +185,7 @@ class TorchNLI:
         self.model = AutoModelForSequenceClassification.from_pretrained(src).float().eval()
 
     def logits(self, evidence, claim):
-        ids, _ = encode_pair(self.tokenizer, evidence, claim, self.max_len)
+        ids, self.last_truncated = encode_pair(self.tokenizer, evidence, claim, self.max_len)
         with self.torch.no_grad():
             tensor = self.torch.tensor([ids], dtype=self.torch.long)
             out = self.model(input_ids=tensor, attention_mask=self.torch.ones_like(tensor)).logits[0]
@@ -247,7 +265,7 @@ def make_handler(judge, model_id, backend, name, letters=None, protocol=None, la
                 return
             try:
                 req = json.loads(self.rfile.read(length).decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
+            except (ValueError, RecursionError):   # 아주 깊이 겹친 JSON 은 RecursionError 로 스레드를 죽인다
                 self.reply(400, {"error": "bad json"})
                 return
             if not isinstance(req, dict) or not isinstance(req.get("evidence"), str) \
@@ -258,15 +276,20 @@ def make_handler(judge, model_id, backend, name, letters=None, protocol=None, la
             if want is not None and not (isinstance(want, str) and want in LABEL_SETS):
                 self.reply(400, {"error": "unknown label_set"})
                 return
-            start = time.perf_counter()
+            if not lock.acquire(timeout=BUSY_WAIT):
+                self.reply(503, {"error": "busy"})
+                return
             try:
-                with lock:
-                    p = judge.probs(req["evidence"], req["claim"])
+                start = time.perf_counter()   # ms 는 판정만 잰다 — 줄 선 시간은 뺀다 (README 3-1)
+                p = judge.probs(req["evidence"], req["claim"])
+                ms = (time.perf_counter() - start) * 1000
+                truncated = bool(getattr(judge, "last_truncated", False))
             except Exception as err:  # 경계 — 판정 하나가 죽어도 서버는 산다. 까닭은 stderr 로
                 print(f"judge 실패: {type(err).__name__}: {err}", file=sys.stderr, flush=True)
                 self.reply(500, {"error": "judge failed"})
                 return
-            ms = (time.perf_counter() - start) * 1000
+            finally:
+                lock.release()
             if len(p) != len(reply_letters) or not all(math.isfinite(float(v)) for v in p):
                 self.reply(500, {"error": "bad probabilities"})
                 return
@@ -276,10 +299,11 @@ def make_handler(judge, model_id, backend, name, letters=None, protocol=None, la
             body["model"] = model_id
             body["ms"] = round(ms, 1)
             if want is not None:
-                # opt-in 손님에게만 세 칸을 더 붙인다 — 실제로 답한 칸 수가 label_set 을 정한다
+                # opt-in 손님에게만 칸을 더 붙인다 — 실제로 답한 칸 수가 label_set 을 정한다
                 body["labels"] = all_labels[:len(p)]
                 body["model_version"] = version
                 body["label_set"] = SET_OF[len(p)]
+                body["truncated"] = truncated
             self.reply(200, body)
 
     return Handler
@@ -315,6 +339,8 @@ def main():
 
     model_dir = os.path.abspath(os.path.expanduser(a.model))
     spec = load_spec(model_dir)
+    if a.backend == "onnx":
+        check_onnx_files(spec, model_dir)
     model_id = spec["weights_sha256"][:8]
     t0 = time.time()
     if a.backend == "onnx":

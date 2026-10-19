@@ -79,14 +79,15 @@ class CompatServeTest(unittest.TestCase):
         port = self.start(FakeJudge([0.1, 0.2, 0.3, 0.4]), FOUR, "nli-v2", labels=LABELS4, model_version="1.1.0")
         code, _, body = self.judge(port, {"label_set": "nli4"})
         self.assertEqual(code, 200)
-        self.assertEqual(list(body), ["a", "b", "c", "d", "model", "ms", "labels", "model_version", "label_set"])
+        self.assertEqual(list(body), ["a", "b", "c", "d", "model", "ms", "labels", "model_version", "label_set",
+                                      "truncated"])
         self.assertEqual((body["labels"], body["model_version"], body["label_set"]), (LABELS4, "1.1.0", "nli4"))
         self.assertAlmostEqual(body["d"], 0.4)
 
     def test_opt_in_nli3_on_four_label_server_folds_d(self):
         port = self.start(FakeJudge([0.1, 0.2, 0.3, 0.4]), FOUR, "nli-v2", labels=LABELS4, model_version="1.1.0")
         _, _, body = self.judge(port, {"label_set": "nli3"})
-        self.assertEqual(list(body), ["a", "b", "c", "model", "ms", "labels", "model_version", "label_set"])
+        self.assertEqual(list(body), ["a", "b", "c", "model", "ms", "labels", "model_version", "label_set", "truncated"])
         self.assertAlmostEqual(body["c"], 0.7)
         self.assertAlmostEqual(body["a"] + body["b"] + body["c"], 1.0)
         self.assertEqual((body["labels"], body["label_set"]), (LABELS4[:3], "nli3"))
@@ -96,7 +97,7 @@ class CompatServeTest(unittest.TestCase):
         port = self.start(FakeJudge([0.7, 0.2, 0.1]), labels=LABELS4[:3])
         code, _, body = self.judge(port, {"label_set": "nli4"})
         self.assertEqual(code, 200)
-        self.assertEqual(set(body), {"a", "b", "c", "model", "ms", "labels", "model_version", "label_set"})
+        self.assertEqual(set(body), {"a", "b", "c", "model", "ms", "labels", "model_version", "label_set", "truncated"})
         self.assertEqual(body["label_set"], "nli3")
         self.assertEqual(body["labels"], LABELS4[:3])
         self.assertEqual(body["model_version"], "abcd1234")   # model.json 에 판 번호가 없으면 가중치 SHA 앞 8자

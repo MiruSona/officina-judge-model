@@ -19,7 +19,6 @@ criteria 에 vs_ref 가 있는 prereg(g2 · g3 규약)는 재지 않고 exit 2 �
 """
 import argparse
 import json
-import math
 import os
 import shutil
 import subprocess
@@ -32,6 +31,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "train"))
 
 from calibrate import answer  # noqa: E402
 from data_prep import CD, LETTERS, sha256_file, strip_tags, want_label  # noqa: E402
+from compare import percentile  # noqa: E402
 
 SUPPORT, CONTRADICT, RELATED = 0, 1, 3
 MEM_LETTERS = {"A": 0, "B": 1, "C": 2, "D": 3}
@@ -48,15 +48,6 @@ def read_rows(path):
             if "_meta" not in row:
                 rows.append(row)
     return rows
-
-
-def pct(xs, q):
-    xs = sorted(xs)
-    k = (len(xs) - 1) * q
-    f, c = math.floor(k), math.ceil(k)
-    if f == c:
-        return xs[f]
-    return xs[f] + (xs[c] - xs[f]) * (k - f)
 
 
 def http_json(url, body=None):
@@ -332,11 +323,11 @@ def measure_set(a, prereg, name, path):
     if mem:
         ladder_rows, ladder_note = run_ladder(mem, path, a.url, prereg, len(rows))
         ladder = ladder_table(golds, ladder_rows, probs)
-    p95 = pct(lat, 0.95)
+    p95 = percentile(sorted(lat), 0.95)
     result = {"set": name, "measured_at": time.strftime("%Y-%m-%d %H:%M:%S"), "model": prereg["model"],
               "letters": letters, "model_table": model, "sure_table": sure,
               "ladder_table": ladder, "ladder_note": ladder_note,
-              "http_ms": {"p50": round(pct(lat, 0.5), 1), "p95": round(p95, 1), "max": round(max(lat), 1)}}
+              "http_ms": {"p50": round(percentile(sorted(lat), 0.5), 1), "p95": round(p95, 1), "max": round(max(lat), 1)}}
     if info["judge"]:
         result["verdict"] = verdict(prereg["criteria"], model, ladder, p95, sure)
     os.makedirs(a.out_dir, exist_ok=True)

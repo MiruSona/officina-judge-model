@@ -17,3 +17,5 @@ env.sh
 # private training data never goes here
 private/
 *.7z
+*.local.md
+Private/

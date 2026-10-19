@@ -251,6 +251,21 @@ class VerdictTest(unittest.TestCase):
         protocol, stats = self.fx.stats(base_pred, new_pred, side=False)
         self.assertEqual(cmp.verdict(protocol, stats)["verdict"], "보류")
 
+    def test_unmeasurable_is_hold_not_crash(self):
+        # 쌍 0 이면 cluster_bootstrap · f1_bootstrap 이 diff · low 를 None 으로 둔다 — TypeError 말고 보류
+        protocol, stats = self.fx.stats(base_pred, new_pred)
+        gate = protocol["pair_gate"]
+        guard = next(g for g in gate["guards"] if "ci_low_ge" in g)
+        for name in (cmp.ruler_name(gate["target"]), cmp.ruler_name(guard)):
+            stats["metrics"][name].update({"diff": None, "low": None, "high": None})
+        self.assertEqual(cmp.guard_result(guard, stats), (None, f"{cmp.ruler_name(guard)} 잴 수 없음"))
+        v = cmp.verdict(protocol, stats)
+        self.assertEqual((v["verdict"], v["target"]["ok"]), ("보류", None))
+        stats.pop("_tables")
+        result = {"base": "B0", "new": "B1", "protocol_sha256": "0" * 64, "set_sha256": "0" * 64,
+                  "stats": stats, "verdict": v}
+        self.assertIn("잴 수 없음", cmp.to_markdown(result))
+
     def test_by_domain_lang(self):
         # mem·ko (g1~g3) : 0.5 → 10/12 · jira·en (g4~g5) : 0.5 → (10/3 + 2)/8
         _, base = cmp.load_runs(self.fx.runs("B0", base_pred))

@@ -750,6 +750,8 @@ def guard_result(guard, stats):
         return ok, " · ".join(notes)
     name = ruler_name(guard)
     s = stats["metrics"][name]
+    if s["low"] is None:   # 쌍 0 이나 부트스트랩 빈 판 — 터지지 말고 보류로
+        return None, f"{name} 잴 수 없음"
     return s["low"] >= guard["ci_low_ge"] - 1e-9, f"{name} 차 {s['diff']:+.4f} [{s['low']:+.4f}, {s['high']:+.4f}]"
 
 
@@ -759,7 +761,10 @@ def verdict(protocol, stats):
     target = gate["target"]
     target_name = ruler_name(target)
     t = stats["metrics"][target_name]
-    target_ok = t["diff"] >= target["min_mean_diff"] - 1e-9 and t["low"] > target["ci_low_gt"]
+    if t["diff"] is None or t["low"] is None:
+        target_ok, target_note = None, f"{target_name} 잴 수 없음"
+    else:
+        target_ok, target_note = t["diff"] >= target["min_mean_diff"] - 1e-9 and t["low"] > target["ci_low_gt"], ""
     guards = []
     for guard in gate["guards"]:
         ok, note = guard_result(guard, stats)
@@ -801,14 +806,14 @@ def verdict(protocol, stats):
                 alarms.append(f"{alarm['lang']} {metric[0]} 재현 {diff:+.4f} < {alarm['min_mean_diff']}")
     if any(g["ok"] is False for g in guards):
         word = "지킴 깨짐"
-    elif not target_ok:
+    elif target_ok is False:
         word = "같다"
-    elif any(g["ok"] is None for g in guards):
+    elif target_ok is None or any(g["ok"] is None for g in guards):
         word = "보류"
     else:
         word = "먹힘"
     return {"verdict": word, "target": {"metric": target_name, "ok": target_ok, "diff": t["diff"],
-                                         "low": t["low"], "high": t["high"]},
+                                         "low": t["low"], "high": t["high"], "note": target_note},
             "guards": guards, "alarms": alarms}
 
 
@@ -827,7 +832,10 @@ def to_markdown(result):
         lines.append(f"| {metric} | {s['base']} | {s['new']} | {s['diff']} | [{s['low']}, {s['high']}] | {test} |")
     lines += ["", "| 관문 | 결과 | 값 |", "| --- | --- | --- |"]
     t = result["verdict"]["target"]
-    lines.append(f"| 목표 {t['metric']} | {'O' if t['ok'] else 'X'} | {t['diff']:+.4f} [{t['low']:+.4f}, {t['high']:+.4f}] |")
+    if t["ok"] is None:
+        lines.append(f"| 목표 {t['metric']} | ? | {t.get('note', '')} |")
+    else:
+        lines.append(f"| 목표 {t['metric']} | {'O' if t['ok'] else 'X'} | {t['diff']:+.4f} [{t['low']:+.4f}, {t['high']:+.4f}] |")
     for g in result["verdict"]["guards"]:
         mark = "?" if g["ok"] is None else ("O" if g["ok"] else "X")
         lines.append(f"| 지킴 {g['metric']} | {mark} | {g['note']} |")

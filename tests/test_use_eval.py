@@ -1,6 +1,7 @@
 """measure/use_eval.py — 대리 서버 · 확신 가르기 · sample(가짜 mem) · 대조 멈춤 · 얼리기 · EXCLUDE · 보고 꼴 (실사용측정설계 3 · 8절).
 가짜 서버 둘(고정 확률)과 가짜 mem(tests/fake_mem.py)만 쓴다. 쓰기는 임시 폴더(JUDGEMODEL_USE1_HOME)에만 한다.
 """
+import argparse
 import contextlib
 import io
 import json
@@ -508,6 +509,44 @@ class FreezeReportTest(Base):
     def test_md_escapes_untrusted_text(self):
         self.assertEqual(report.safe("a|b`c<d"), "a\\|b\\`c&lt;d")
         self.assertTrue(report.safe("x" * 200).endswith("…"))
+
+
+class StopTest(Base):
+    """use_eval stop — /health 가 안 답하면 기록한 pid 를 죽이지 않는다 (재부팅 뒤 남의 프로세스일 수 있다)."""
+
+    def stop(self, health):
+        from unittest import mock
+        from use_sites import servers
+        path = common.shared_path("servers.json")
+        common.write_json(path, {"9": {"pid": 424242, "name": "nli-x"}})
+        with mock.patch.object(servers.proxy, "health", return_value=health),                 mock.patch.object(servers.os, "kill") as kill, contextlib.redirect_stdout(io.StringIO()):
+            servers.cmd_stop(argparse.Namespace(port=9))
+        return kill, common.read_json(path)
+
+    def test_unreachable_keeps_record_without_kill(self):
+        kill, left = self.stop(None)
+        kill.assert_not_called()
+        self.assertEqual(left, {"9": {"pid": 424242, "name": "nli-x"}})
+
+    def test_reachable_same_name_kills(self):
+        kill, left = self.stop({"name": "nli-x"})
+        kill.assert_called_once()
+        self.assertEqual(left, {})
+
+
+class ProbeTest(Base):
+    """probe — 503 busy 는 unreachable 이 아니라 상태 코드로 적는다 (HTTPError 는 URLError 하위)."""
+
+    def test_http_error_records_status_code(self):
+        import urllib.error
+        from unittest import mock
+        from use_sites import proxy
+        busy = urllib.error.HTTPError("http://x/health", 503, "busy", None, None)
+        p = proxy.Proxy({"m": "http://x"}, "m", "unused.jsonl", "a")
+        with mock.patch.object(proxy, "http_get_json", side_effect=busy):
+            with self.assertRaises(common.Refuse):
+                p.probe()
+        self.assertEqual(p.status["m"]["why"], "http 503")
 
 
 _ = helpers

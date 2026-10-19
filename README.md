@@ -56,6 +56,7 @@ venv-serve/Scripts/pip install -r requirements.txt      # Linux · macOS 는 ven
 | `calibration.json` | 온도 보정 값 |
 
 `model.json` 의 `onnx_sha256` 은 그래프만, `onnx_data_sha256` 은 가중치 파일을 가리킨다.
+`serve.py` 는 띄울 때 두 해시를 실제 파일과 견주고, 다르면 띄우지 않는다 (2GB 면 몇 초 걸린다).
 
 ### 2-3. 띄우기
 
@@ -109,12 +110,14 @@ curl -s -X POST http://127.0.0.1:8092/judge \
 
 ### 3-2. `label_set` 고르기 (opt-in)
 
-**`label_set` 을 안 실으면 응답은 위 꼴 그대로다.** 실으면 칸 세 개(`labels` · `model_version` · `label_set`)가 더 붙는다.
+**`label_set` 을 안 실으면 응답은 위 꼴 그대로다.** 실으면 칸 네 개(`labels` · `model_version` · `label_set` · `truncated`)가 더 붙는다.
+`truncated` 는 근거가 최대 길이를 넘어 잘렸으면 `true` 다.
 
 ```
 POST /judge {"evidence": "...", "claim": "...", "label_set": "nli4"}
 → 200 {"a", "b", "c", "d", "model", "ms",
-       "labels": ["support", "contradict", "unrelated", "related"], "model_version": "1.1.0", "label_set": "nli4"}
+       "labels": ["support", "contradict", "unrelated", "related"], "model_version": "1.1.0", "label_set": "nli4",
+       "truncated": false}
 ```
 
 | 요청 `label_set` | 네 칸 모델 | 세 칸 모델 · `--compat3` |
@@ -157,6 +160,7 @@ GET /info   → {"api_version", "model_version", "model", "name", "protocol", "l
 | `evidence` · `claim` 이 글이 아님 | 400 |
 | 모르는 `label_set` | 400 |
 | 없는 경로 | 404 |
+| 앞 판정을 5초 넘게 기다림 | 503 `{"error": "busy"}` |
 
 몸통을 덜 보내고 멈춘 연결은 10초 뒤 끊는다.
 
