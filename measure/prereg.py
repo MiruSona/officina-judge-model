@@ -99,10 +99,23 @@ NEXT_G9 = {
     "두 판 연속": "g9 지킴이 두 판 연속 깨짐 — v1.2 접음 · 8092 v1.1.0 유지 (사용자에게 알림). 연속 수는 K7 부터 센다",
     "같다": "목표만 미달 · 판별 불가 — 메인 판단 → 사용자",
 }
+# g10 (K8 판) — 출시 관문과 꽂기 조건(8092 교체)을 나누고, 학습 전 반증 문 멈춤까지 박제한다 (비공개 K8 설계 6-4)
+NEXT_G10 = {
+    "pass": "gates.py release 통과 — 꽂기 조건(conflict 합성 28 ≥ .9 · 실제 50 오탐 ≤ 10% · 200쌍 ≤ 300초)도 지나면 "
+            "8092 를 K8 로 바꾼다. 꽂기 조건 미달이면 v1.2.1 후보로만 두고 8092 는 v1.2.0 유지",
+    "p95_only": "int8 → 그래도 넘으면 K8 은 내지 않고 8092 는 v1.2.0(nli-studio-v10) 유지",
+    "fail": "출시 관문 미달 — K8 은 내지 않고 8092 는 v1.2.0 유지 · blind-g4 는 두 번 쓴 셋",
+    "먹힘": "K8 먹힘(목표 b_f1@dev-long-g10 통과 · 지킴 깨짐 0) — blind-g4 를 미리 정한 한 판(release_pick)으로 한 번 연다",
+    "지킴 깨짐": "K8 지킴 깨짐 — 진단(pred.jsonl 혼동표 · 원천 × 칸 · 구간 · 새 꼴별) → 사용자. 대체 판은 적지 않는다",
+    "두 판 연속": "g9 · g10 지킴(같은 값)이 두 판 연속 깨짐 — 다음 판 접음 · 8092 v1.2.0 유지. 연속 수는 K7 부터 이어 센다",
+    "같다": "목표만 미달 — K8 은 내지 않고 8092 v1.2.0 유지 · 메인 판단 → 사용자",
+    "반증": "K7 의 b_f1@dev-long-g10 이 dev-cmp-g9 b_f1@ko 보다 .10 넘게 낮지 않음 — 공개 글에서 약점이 안 선다 · 학습 안 띄움 · 사용자",
+}
 # 기준 모델 대비 규약(vs_ref)의 다음 걸음 — 규약 파일 이름으로 고른다. 표에 없는 이름은 --next 로 준다.
 NEXT_BY_PROTOCOL = {"protocol-g2.json": NEXT_G2, "protocol-g3.json": NEXT_G3, "protocol-g4.json": NEXT_G4,
                     "protocol-g5.json": NEXT_G5, "protocol-g6.json": NEXT_G6,
-                    "protocol-g7.json": NEXT_G7, "protocol-g8.json": NEXT_G8, "protocol-g9.json": NEXT_G9}
+                    "protocol-g7.json": NEXT_G7, "protocol-g8.json": NEXT_G8, "protocol-g9.json": NEXT_G9,
+                    "protocol-g10.json": NEXT_G10}
 NEXT_V2 = {
     "pass": "nli-studio-v3 를 꽂는다 (응답 nli-v2) · 손님 판올림 · 작업 기록",
     "p95_only": "int8 → 그래도 넘으면 옛 서버(nli-studio-v2) 유지",

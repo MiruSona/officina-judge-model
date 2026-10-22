@@ -562,12 +562,23 @@ class PreregFourTest(unittest.TestCase):
         self.assertEqual(got["next"]["fail"], "출시 관문 미달 — K6 는 내지 않고 8092 는 v1.1.0 유지 · blind-g4 는 쓴 셋")
         self.assertEqual(got["release_gate"], gate)
 
+    def test_g10_protocol_next_is_k8_round(self):
+        # K8 설계 6-4 : protocol-g10 박제는 K8 문구 — 꽂기 조건 · 반증 문 칸이 있고 K7(g9) 문구를 박지 않는다
+        with open(PROTOCOL_G6.replace("protocol-g6.draft.json", "protocol-g10.json"), encoding="utf-8") as f:
+            gate = json.load(f)["release_gate"]
+        got = prereg.build(self.four_spec(), {}, set(), set(), {"release_gate": gate}, "/x/protocol-g10.json", "e" * 64)
+        self.assertEqual(got["next"], prereg.NEXT_G10)
+        self.assertNotEqual(got["next"], prereg.NEXT_G9)
+        self.assertEqual(set(got["next"]), set(prereg.NEXT_G9) | {"반증"})
+        self.assertIn("꽂기 조건", got["next"]["pass"])
+        self.assertIn("v1.2.0", got["next"]["fail"])
+
     def test_unknown_vs_ref_protocol_needs_next(self):
         gate = {"release_gate": protocol_gate_g2()}
         with self.assertRaises(SystemExit):
-            prereg.build(self.four_spec(), {}, set(), set(), gate, "/x/protocol-g10.json", "e" * 64)
+            prereg.build(self.four_spec(), {}, set(), set(), gate, "/x/protocol-g11.json", "e" * 64)
         mine = {"fail": "따로 정한 문구"}
-        got = prereg.build(self.four_spec(), {}, set(), set(), gate, "/x/protocol-g10.json", "e" * 64, mine)
+        got = prereg.build(self.four_spec(), {}, set(), set(), gate, "/x/protocol-g11.json", "e" * 64, mine)
         self.assertEqual(got["next"], mine)
 
     def test_main_next_file_wins(self):

@@ -212,9 +212,16 @@ def ruler_name(spec):
     return spec["metric"] + ("@" + "·".join(parts) if parts else "") + (DROP_TAIL if spec.get("drop_forms") else "")
 
 
+def gate_name(spec):
+    """짝 관문 자 이름 — 다른 셋으로 재는 목표(protocol-g10 의 target.set)는 꼬리 #셋 을 붙인다 (b_f1#dev-long-g10).
+    release_pick 의 set 칸은 잴 셋 그 자체라 ruler_name 에는 안 붙인다."""
+    return ruler_name(spec) + (SET_TAIL + str(spec["set"]) if spec.get("set") else "")
+
+
 # 생성기 꼴 빼기 (protocol-g9 부터) — 자에 "drop_forms": "generator_forms" 를 달면 셋 줄의 form 칸이
 # 규약 generator_forms 목록에 든 쌍을 빼고 센다. 뺀 자 곁에 같은 자를 모든 쌍으로 센 값을 보고만 싣는다
 DROP_TAIL = "/nogen"
+SET_TAIL = "#"
 FORM_KEY = "form"
 DROP_LISTS = ("generator_forms",)
 
@@ -295,6 +302,8 @@ def gate_specs(protocol):
     alarms = [spec for alarm in gate.get("alarms", []) for spec in expand_alarm(alarm)]
     out = []
     for spec in [gate.get("target", {})] + gate.get("guards", []) + alarms:
+        if spec.get("set"):        # 다른 셋으로 재는 자(목표 셋) — target_set_stats 가 따로 센다
+            continue
         if spec.get("drop_forms"):
             out += [with_drop(protocol, spec), all_pairs_twin(spec)]
         else:
@@ -729,6 +738,55 @@ def compare(protocol, set_rows, base_runs, new_runs):
     return stats
 
 
+def target_dir(run, set_name):
+    """판 자리(…/g10/eval-dev-cmp-g9) → 같은 판의 목표 셋 자리 (형제 폴더 …/g10/eval-<셋>)."""
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(run["path"]))), f"eval-{set_name}")
+
+
+def check_target_runs(dev_runs, target_runs):
+    """목표 판이 짝 dev 판과 같은 모델(eval_nli summary 의 model)이고, 목표 판끼리 자리가 겹치지 않는지 — 어긋나면 Refuse."""
+    paths = [os.path.abspath(t["path"]) for t in target_runs]
+    if len(set(paths)) != len(paths):
+        raise Refuse("목표 셋 판 자리가 겹친다 — 씨앗마다 다른 판을 준다")
+    for run, t in zip(dev_runs, target_runs):
+        model = (run["summary"] or {}).get("model")
+        if not model or model != (t["summary"] or {}).get("model"):
+            raise Refuse(f"목표 셋 판 {t['path']} 의 model 이 dev 판 {run['path']} 과 다르거나 없다")
+
+
+def target_set_stats(protocol, protocol_sha, target_path, base_runs, new_runs):
+    """목표가 다른 셋(pair_gate.target.set, protocol-g10)이면 그 셋 pred 로 목표 자와 말별 조각(보고만)을 센다.
+    목표에 set 이 없으면 (None, None). 셋 · 판 해시가 규약과 어긋나면 Refuse."""
+    target = protocol.get("pair_gate", {}).get("target", {})
+    name = target.get("set")
+    if not name:
+        if target_path:
+            raise Refuse("--target-set 을 줬는데 규약 목표에 set 이 없다 — 조용히 버리지 않는다")
+        return None, None
+    if not target_path:
+        raise Refuse(f"규약 목표가 셋 {name} 으로 잰다 — --target-set 을 준다")
+    want = protocol.get("sets", {}).get(name)
+    sha = sha256_file(target_path)
+    if not want or want != sha:
+        raise Refuse(f"--target-set 해시 {sha[:12]} 가 규약의 {name} 해시 {str(want)[:12]} 와 다르다")
+    base_t = [load_run(target_dir(r, name)) for r in base_runs]
+    new_t = [load_run(target_dir(r, name)) for r in new_runs]
+    check_target_runs(base_runs + new_runs, base_t + new_t)
+    check_hashes(dict(protocol, compare_on=name), protocol_sha, sha, [("기준 목표 셋", base_t), ("새 판 목표 셋", new_t)])
+    rows = read_set(target_path)
+    ids = list(rows)
+    base, new = pair_hits(base_t, ids), pair_hits(new_t, ids)
+    check_same_pairs(base, new, "목표 셋 두 조건")
+    langs = sorted({str(rows[pid].get("lang")) for pid in base["ids"] if rows[pid].get("lang")})
+    specs = [target] + [dict(target, lang=lang) for lang in langs]
+    plain = [{k: v for k, v in s.items() if k != "set"} for s in specs]
+    if is_f1(target["metric"]):
+        got = f1_compare(protocol, rows, base, new, plain)
+    else:
+        got = {ruler_name(s): slice_compare(protocol, rows, base, new, s) for s in plain}
+    return {gate_name(s): dict(got[ruler_name(p)], metric=gate_name(s)) for s, p in zip(specs, plain)}, sha
+
+
 def guard_result(guard, stats):
     """지킴 하나 → (통과 True/False/None(잴 수 없음), 한 줄 까닭)."""
     metric = guard["metric"]
@@ -759,8 +817,8 @@ def verdict(protocol, stats):
     """관문 표 → 먹힘 · 같다 · 지킴 깨짐 · 보류 (뜻은 protocol pair_gate.verdicts)."""
     gate = protocol["pair_gate"]
     target = gate["target"]
-    target_name = ruler_name(target)
-    t = stats["metrics"][target_name]
+    target_name = gate_name(target)
+    t = stats["metrics"].get(target_name) or {"diff": None, "low": None, "high": None}   # 목표 셋 자를 안 셌으면 잴 수 없음
     if t["diff"] is None or t["low"] is None:
         target_ok, target_note = None, f"{target_name} 잴 수 없음"
     else:
@@ -884,6 +942,7 @@ def parse_args(argv=None):
     p.add_argument("--base", required=True, help="이름=판1,판2,판3")
     p.add_argument("--new", required=True, help="이름=판1,판2,판3")
     p.add_argument("--by", default="", help="쉼표로 칸 이름 (domain,lang) — 칸 조합별 표")
+    p.add_argument("--target-set", default="", help="목표 셋 jsonl (규약 pair_gate.target.set 이 있을 때 — protocol-g10)")
     p.add_argument("--out", default="", help="결과 json")
     p.add_argument("--md", default="", help="결과 마크다운 (비면 표준 출력만)")
     return p.parse_args(argv)
@@ -899,8 +958,13 @@ def run(argv=None):
     check_hashes(protocol, protocol_sha, set_sha, [(base_name, base_runs), (new_name, new_runs)])
     stats = compare(protocol, set_rows, base_runs, new_runs)
     base, new = stats.pop("_tables")
+    target_stats, target_sha = target_set_stats(protocol, protocol_sha, a.target_set, base_runs, new_runs)
+    if target_stats is not None:
+        stats["metrics"].update(target_stats)
     result = {"base": base_name, "new": new_name, "protocol_sha256": protocol_sha, "set_sha256": set_sha,
               "set": os.path.basename(a.set), "stats": stats, "verdict": verdict(protocol, stats)}
+    if target_sha:
+        result["target_set_sha256"] = target_sha
     if a.by:
         result["by"] = by_table(set_rows, base["ids"], base, new, [k.strip() for k in a.by.split(",") if k.strip()])
     md = to_markdown(result)

@@ -351,5 +351,72 @@ class ParagraphTest(unittest.TestCase):
         self.assertEqual(got["머리 하나다."], "머리 하나다.")
 
 
+class NegKindTest(unittest.TestCase):
+    """K8 긴 줄 층의 neg kind — 부정어 넣기 · 빼기 초안과 check_line 의 「부정어 차이 딱 1」."""
+
+    def flips(self, text, lang="ko"):
+        return [(s["text"], s["flip"], s["dir"]) for s in sc.find_neg_slots(text, lang)]
+
+    def test_ko_add_and_remove(self):
+        self.assertEqual(self.flips("그는 회의를 진행했다."), [("진행했다", "진행하지 않았다", "add")])
+        self.assertEqual(self.flips("이 도시는 수도이다. 그곳은 바다가 아니다."),
+                         [("수도이다", "수도가 아니다", "add"), ("바다가 아니다", "바다다", "del")])
+        self.assertEqual(self.flips("영향을 받지 않다 · 문제가 있다"),
+                         [("받지 않다", "받다", "del"), ("있다", "없다", "add")])
+        self.assertEqual(self.flips("그 일은 안 한다."), [("안 한다", "한다", "del")])
+        self.assertEqual(self.flips("진행했고 끝났다"), [])                      # 절 끝이 아닌 「했고」 · 규칙 밖 「끝났다」
+
+    def test_en_add_and_remove(self):
+        self.assertEqual(self.flips("The city is the capital.", "en"), [("is", "is not", "add")])
+        self.assertEqual(self.flips("It was not built and cannot move.", "en"),
+                         [("was not", "was", "del"), ("cannot", "can", "del")])
+        self.assertEqual(sc.count_neg("It isn't here, never.", "en"), 2)
+
+    def test_new_value_and_kinds(self):
+        slot = sc.find_neg_slots("그는 회의를 진행했다.")[0]
+        self.assertEqual(sc.new_value(slot, "그는 회의를 진행했다.", random.Random(1)), "진행하지 않았다")
+        self.assertIn("neg", sc.KINDS)
+        self.assertFalse(any(s["kind"] == "neg" for s in sc.find_slots("그는 회의를 진행하지 않았다.")))   # find_slots 는 안 낸다
+
+    def test_check_line_neg_needs_exactly_one(self):
+        scrubber = scrub.Scrubber([], ())
+        seed = "그는 3월에 회의를 진행했다."
+        row = {"seed": seed, "new": "진행하지 않았다", "slot": {"kind": "neg", "text": "진행했다"}, "lang": "ko"}
+        self.assertEqual(sc.check_line(seed, "그는 3월에 회의를 진행하지 않았다.", "b", row, scrubber), [])
+        self.assertIn("negation", sc.check_line(seed, "그는 3월에 회의를 안 진행하지 않았다.", "b", row, scrubber))
+        back = {"seed": "그는 회의를 진행하지 않았다. 그것은 한다.", "new": "진행했다", "slot": {"kind": "neg"}, "lang": "ko"}
+        self.assertEqual(sc.check_line(back["seed"], "그는 회의를 진행했다. 그것은 한다.", "b", back, scrubber), [])
+        en = {"seed": "The bridge was built in 1990.", "new": "was not", "slot": {"kind": "neg", "text": "was"}, "lang": "en"}
+        self.assertEqual(sc.check_line(en["seed"], "The bridge was not built in 1990.", "b", en, scrubber), [])
+        self.assertIn("negation", sc.check_line(en["seed"], "The bridge was built in 1990.", "b", en, scrubber))
+        # 옛 kind 는 옛 규칙 그대로 — 부정어가 늘면 negation
+        num = {"seed": seed, "new": "4월", "slot": {"kind": "date", "text": "3월"}}
+        self.assertIn("negation", sc.check_line(seed, "그는 4월에 회의를 진행하지 않았다.", "b", num, scrubber))
+
+
+class OldOutputSameTest(unittest.TestCase):
+    """neg kind 를 더하기 전(2026-10-22) 출력 sha — paragraph 꼴 make · check 출력이 바이트 그대로인가."""
+
+    setUp, tearDown, run_sc = ParagraphTest.setUp, ParagraphTest.tearDown, ParagraphTest.run_sc
+    count, make = ParagraphTest.count, ParagraphTest.make
+
+    OLD_PARA = {"input.jsonl": "5573ff2acdd974b200c047380479b891324409e75e4ea5e5b491f0ad3bc27000",
+                "make.json": "31d2a2a29d143a540f68fc50b15fcc1a774324391532f6fb71074c6123a982f4"}
+    OLD_CHECK_STDOUT = "59108475e59406309b8a18abad78532e23622c5dce590da436e2ac8e225c4746"
+    OLD_CHECK_OUT = "0276cec0137bb14baacfd10a127badc2ff86b36f989df2731ed542df6d39610f"
+
+    def test_paragraph_and_check_bytes_same(self):
+        import hashlib
+        self.count("--evidence", "paragraph")
+        self.make("--evidence", "paragraph", "--domain", "archive")
+        for name, sha in self.OLD_PARA.items():
+            self.assertEqual(sha_of(os.path.join(self.out, name)), sha, name)
+        chk = os.path.join(self.out, "chk.jsonl")
+        stdout = self.run_sc("check", "--in", os.path.join(self.out, "input.jsonl"), "--out", chk, "--judge-root",
+                             self.judge, "--names", "--game-names", "--allow-git")
+        self.assertEqual(hashlib.sha256(stdout.encode()).hexdigest(), self.OLD_CHECK_STDOUT)
+        self.assertEqual(sha_of(chk), self.OLD_CHECK_OUT)
+
+
 if __name__ == "__main__":
     unittest.main()

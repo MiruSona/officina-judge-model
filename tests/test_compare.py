@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -700,6 +701,132 @@ class G8ProtocolTest(unittest.TestCase):
             frozen = f.read()
         digest = json.loads(frozen)["train_sets"]["train-g4-bal2"]
         self.assertEqual(draft.replace('"train-g4-bal2": ""', f'"train-g4-bal2": "{digest}"'), frozen)
+
+
+PROTOCOL_G9 = os.path.join(helpers.ROOT, "measure", "protocol-g9.json")
+PROTOCOL_G10 = os.path.join(helpers.ROOT, "measure", "protocol-g10.json")
+
+
+class G10ProtocolTest(unittest.TestCase):
+    """protocol-g10 — 지킴 · 경보 · 관문은 g9 글자 그대로, 목표만 다른 셋(dev-long-g10)에서 센다 (K8 설계 6-2 · 6-3)."""
+
+    def test_same_rulers_as_g9(self):
+        g9, _ = cmp.read_protocol(PROTOCOL_G9)
+        g10, _ = cmp.read_protocol(PROTOCOL_G10)
+        for key in ("seeds", "seed_rerun", "ckpt", "release_pick", "bootstrap", "group_key", "majority", "calibrate_on",
+                    "compare_on", "side", "label_guide"):
+            self.assertEqual(g10[key], g9[key], key)
+        for key in ("guards", "alarms", "min_seeds", "slice_note"):
+            self.assertEqual(g10["pair_gate"][key], g9["pair_gate"][key], key)
+        self.assertEqual({k: v for k, v in g10["release_gate"].items() if k != "reuse_note"}, g9["release_gate"])
+        self.assertEqual((g10["name"], g10["pair_gate"]["base"], g10["pair_gate"]["new"]), ("protocol-g10", "K7", "K8"))
+        self.assertEqual(g10["pair_gate"]["target"],
+                         {"metric": "b_f1", "set": "dev-long-g10", "min_mean_diff": 0.05, "ci_low_gt": 0.0})
+        self.assertEqual({k: v for k, v in g10["sets"].items() if k != "dev-long-g10"}, g9["sets"])
+        self.assertRegex(g10["sets"]["dev-long-g10"], "^[0-9a-f]{64}$")
+        self.assertEqual(g10["train"]["recipe"], g9["train"]["recipe"] + ["train-g10-long"])
+        self.assertEqual(g10["train"]["class_weight_fixed"], g9["train"]["class_weight_fixed"])
+        self.assertEqual(g10["generator_forms"][:len(g9["generator_forms"])], g9["generator_forms"])
+        self.assertEqual(len([f for f in g10["generator_forms"] if f.startswith("long-")]), 8)
+        self.assertEqual(cmp.gate_name(g10["pair_gate"]["target"]), "b_f1#dev-long-g10")
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp = self._tmp.name
+        self.fx = Fixture(tmp, PROTOCOL_G10)
+        self.target_rows = make_set()
+        self.target_path = os.path.join(tmp, "dev-long-g10.jsonl")
+        write_jsonl(self.target_path, self.target_rows)
+        self.target_sha = cmp.sha256_file(self.target_path)
+        protocol = cmp.read_json(self.fx.protocol)
+        protocol["sets"]["dev-long-g10"] = self.target_sha
+        with open(self.fx.protocol, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(protocol, f, ensure_ascii=False, indent=1)
+        self.fx.protocol_sha = cmp.sha256_file(self.fx.protocol)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def runs(self, cond, dev_fn, target_fn, target_sha=None):
+        """dev-cmp 판(Fixture) + 같은 판의 형제 폴더 eval-dev-long-g10 (목표 셋 pred · summary)."""
+        models = {seed: {"model": f"/runs/g1-{cond}-s{seed}/ckpt-last"} for seed in (1, 2, 3, 4, 5)}
+        spec = self.fx.runs(cond, dev_fn, summary=models, seeds=(1, 2, 3, 4, 5))
+        for seed in (1, 2, 3, 4, 5):
+            folder = os.path.join(self.fx.tmp, "runs", f"g1-{cond}-s{seed}", "eval-dev-long-g10")
+            os.makedirs(folder, exist_ok=True)
+            write_jsonl(os.path.join(folder, "pred.jsonl"), pred_rows(self.target_rows, target_fn, seed))
+            with open(os.path.join(folder, "summary.json"), "w", encoding="utf-8") as f:
+                json.dump({"set_sha256": target_sha or self.target_sha, "protocol_sha256": self.fx.protocol_sha,
+                           "model": models[seed]["model"]}, f)
+        return spec
+
+    def args(self, base, new, target=True):
+        out = ["--protocol", self.fx.protocol, "--set", self.fx.set_path, "--base", base, "--new", new,
+               "--out", os.path.join(self.fx.tmp, "out.json")]
+        return out + (["--target-set", self.target_path] if target else [])
+
+    def test_target_counted_on_target_set_only(self):
+        # 목표 셋 : 기준은 g1·g2 의 b 넷을 a 로 봄(broken_pred), 새 판은 b 를 다 맞힘(new_pred) → b_f1 이 오른다.
+        # dev-cmp 는 두 조건이 같다(base_pred) — 목표가 dev-cmp 로 세졌다면 차 0 이다
+        base = self.runs("B0", base_pred, broken_pred)
+        new = self.runs("B1", base_pred, new_pred)
+        code, _, err = quiet(cmp.main, self.args(base, new))
+        self.assertEqual(code, 0, err)
+        result = cmp.read_json(os.path.join(self.fx.tmp, "out.json"))
+        t = result["verdict"]["target"]
+        self.assertEqual(t["metric"], "b_f1#dev-long-g10")
+        self.assertGreater(t["diff"], 0.05)
+        self.assertEqual(result["target_set_sha256"], self.target_sha)
+        metrics = result["stats"]["metrics"]
+        self.assertIn("b_f1@ko#dev-long-g10", metrics)
+        self.assertIn("b_f1@en#dev-long-g10", metrics)
+        self.assertEqual(metrics["b_f1"]["diff"], 0.0)          # 지킴 b_f1 은 dev-cmp 로 센 값
+
+    def test_missing_or_wrong_target_set_refused(self):
+        base = self.runs("B0", base_pred, base_pred)
+        new = self.runs("B1", base_pred, new_pred)
+        code, _, err = quiet(cmp.main, self.args(base, new, target=False))
+        self.assertEqual(code, 2)
+        self.assertIn("--target-set", err)
+        write_jsonl(self.target_path, self.target_rows[:-1])   # 규약 해시와 다른 목표 셋
+        code, _, err = quiet(cmp.main, self.args(base, new))
+        self.assertEqual(code, 2)
+        self.assertIn("해시", err)
+
+    def test_target_run_measured_other_set_refused(self):
+        base = self.runs("B0", base_pred, base_pred, target_sha="0" * 64)
+        new = self.runs("B1", base_pred, new_pred)
+        code, _, err = quiet(cmp.main, self.args(base, new))
+        self.assertEqual(code, 2)
+        self.assertIn("set_sha256", err)
+
+    def test_seeds_sharing_one_target_run_refused(self):
+        base = self.runs("B0", base_pred, base_pred)
+        new = self.runs("B1", base_pred, new_pred)
+        paths = new.split("=", 1)[1].split(",")
+        # 씨앗 2 의 dev 판을 씨앗 1 판 폴더 안에 두면 형제 목표 폴더가 씨앗 1 것과 같아진다
+        alias = os.path.join(self.fx.tmp, "runs", "g1-B1-s1", "eval-dev-cmp-s2")
+        shutil.copytree(paths[1], alias)
+        paths[1] = alias
+        code, _, err = quiet(cmp.main, self.args(base, "B1=" + ",".join(paths)))
+        self.assertEqual(code, 2)
+        self.assertIn("겹친다", err)
+
+    def test_target_run_of_other_model_refused(self):
+        base = self.runs("B0", base_pred, base_pred)
+        new = self.runs("B1", base_pred, new_pred)
+        path = os.path.join(self.fx.tmp, "runs", "g1-B1-s3", "eval-dev-long-g10", "summary.json")
+        s = cmp.read_json(path)
+        s["model"] = "/runs/other/ckpt-last"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(s, f)
+        code, _, err = quiet(cmp.main, self.args(base, new))
+        self.assertEqual(code, 2)
+        self.assertIn("model", err)
+
+    def test_target_set_without_protocol_set_refused(self):
+        with self.assertRaisesRegex(cmp.Refuse, "set 이 없다"):
+            cmp.target_set_stats({"pair_gate": {"target": {"metric": "b_f1"}}}, "p" * 64, self.target_path, [], [])
 
 
 class G6AlarmTest(unittest.TestCase):

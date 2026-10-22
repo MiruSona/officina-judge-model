@@ -46,7 +46,7 @@ SEED_LEN = (15, 220)
 PARA_SPAN = 1                    # paragraph 꼴 문단 = 같은 절에서 씨앗 문장 앞뒤로 이만큼 (최대 세 문장)
 PARA_ID = "ka"                   # paragraph 꼴 seed_id 머리 — K 씨앗(k0001…)과 안 겹치게
 MAX_SLOTS = 6                    # 값 자리가 이보다 많으면 표 · 나열 글로 보고 뺀다
-KINDS = ("num", "date", "ord", "onoff", "bound", "firstlast", "who")
+KINDS = ("num", "date", "ord", "onoff", "bound", "firstlast", "who", "neg")   # neg 는 find_slots 가 안 낸다(find_neg_slots) — find_slots 출력이 바뀌지 않게
 TIME_KINDS = ("date",)
 WEIGHTS = {"num": 4, "date": 2}  # 한 바퀴에 고르는 수 (나머지 종류 1) — 수 자리가 가장 많고 설계 보기(「3월 120만」)도 수다
 G1_EVAL = ("dev-cal", "dev-cmp", "blind-g1", "ood-g1")
@@ -55,6 +55,9 @@ G3_EVAL = ("dev-cmp-g3", "dev-cal-g3", "blind-g3")   # paragraph 꼴(K4 archive)
 G4_EVAL = ("dev-cmp-g4", "blind-g4")
 INSTRUCTION = ("문장 다듬기만 한다 : 초안의 조사 · 단위 · 띄어쓰기만 자연스럽게 고친다. "
                "바꾼 자리 밖의 낱말 · 값은 씨앗 그대로 두고, 새 값을 바꾸거나 부정어(않다 · 안 · 못 · 아니다)를 넣지 않는다.")
+
+NEG_INSTRUCTION = ("문장 다듬기만 한다 : 초안의 조사 · 어미 · 띄어쓰기만 자연스럽게 고친다. "
+                   "바꾼 자리 밖의 낱말 · 값은 씨앗 그대로 두고, 부정어(않다 · 안 · 못 · 아니다 · not) 하나만 넣거나 뺀다.")
 
 # ---------------------------------------------------------------- 값 자리 찾기
 
@@ -184,6 +187,78 @@ def _not_a_value(text, slot):
     return False
 
 
+# ---------------------------------------------------------------- 부정어 자리 (neg kind, K8 긴 줄 층)
+#
+# 절 끝 서술어 하나에 부정어를 넣거나 뺀다. 규칙 초안이라 어색한 꼴은 awkward 표시를 달고 다듬기 몫으로 넘긴다.
+
+_CLAUSE_END = r"(?=$|[.,;)」』\]]|\s[·—/]|\s*$)"
+_KO_NEG_RULES = (   # (꼴, 바꿈 함수, 방향, 어색한가) — 위에서부터 먼저 걸린 것이 이긴다
+    (re.compile(rf"([가-힣]*)하지 않았다{_CLAUSE_END}"), lambda m: m.group(1) + "했다", "del", False),
+    (re.compile(rf"([가-힣]*)하지 않는다{_CLAUSE_END}"), lambda m: m.group(1) + "한다", "del", False),
+    (re.compile(rf"([가-힣]*)되지 않았다{_CLAUSE_END}"), lambda m: m.group(1) + "됐다", "del", False),
+    (re.compile(rf"([가-힣]*)되지 않는다{_CLAUSE_END}"), lambda m: m.group(1) + "된다", "del", False),
+    (re.compile(rf"([가-힣]+)지 않다{_CLAUSE_END}"), lambda m: m.group(1) + "다", "del", False),
+    (re.compile(rf"([가-힣]+)[이가] 아니다{_CLAUSE_END}"), lambda m: _copula(m.group(1)), "del", False),
+    (re.compile(rf"(?<![가-힣])(?:안|못) ([가-힣]+다){_CLAUSE_END}"), lambda m: m.group(1), "del", False),
+    (re.compile(rf"([가-힣]*)없(다|었다){_CLAUSE_END}"), lambda m: m.group(1) + "있" + m.group(2), "del", False),
+    (re.compile(rf"([가-힣]*)(?:했다|하였다){_CLAUSE_END}"), lambda m: m.group(1) + "하지 않았다", "add", False),
+    (re.compile(rf"([가-힣]*)한다{_CLAUSE_END}"), lambda m: m.group(1) + "하지 않는다", "add", False),
+    (re.compile(rf"([가-힣]*)(?:됐다|되었다){_CLAUSE_END}"), lambda m: m.group(1) + "되지 않았다", "add", False),
+    (re.compile(rf"([가-힣]*)된다{_CLAUSE_END}"), lambda m: m.group(1) + "되지 않는다", "add", False),
+    (re.compile(rf"([가-힣]+)이다{_CLAUSE_END}"), lambda m: m.group(1) + _subj(m.group(1)) + " 아니다", "add", False),
+    (re.compile(rf"([가-힣]*)있(다|었다){_CLAUSE_END}"), lambda m: m.group(1) + "없" + m.group(2), "add", False),
+    (re.compile(rf"([가-힣]+[많크높낮좋길짧넓작적같])다{_CLAUSE_END}"), lambda m: m.group(1) + "지 않다", "add", True),
+)
+_EN_AUX = r"is|was|are|were|has|have|had|will|does|did|could|would|should|must"
+_EN_NEG_RULES = (
+    (re.compile(rf"\b({_EN_AUX}) not\b"), lambda m: m.group(1), "del", False),
+    (re.compile(r"\bcannot\b"), lambda m: "can", "del", False),
+    (re.compile(r"\b(is|was|are|were|has|have|had|does|did|could|would|should)n't\b"), lambda m: m.group(1), "del", False),
+    (re.compile(r"\bwon't\b"), lambda m: "will", "del", False),
+    (re.compile(rf"\b({_EN_AUX}) never\b"), lambda m: m.group(1), "del", False),
+    # 「has also played」 → 「has not also played」 처럼 부사가 끼면 어색해서 그 꼴은 안 짓는다
+    (re.compile(rf"\b({_EN_AUX})\b(?= (?!not\b|never\b|n't|also\b|already\b|still\b|just\b|only\b)[a-z])"),
+     lambda m: m.group(1) + " not", "add", False),
+    (re.compile(r"\bcan\b(?= (?!not\b)[a-z])"), lambda m: "cannot", "add", False),
+)
+_NEG_EN = re.compile(r"\b(?:not|never|no|none|cannot|neither|nor)\b|n't\b", re.I)
+
+
+def _has_final(syllable):
+    """한글 글자에 받침이 있나 (한글 아니면 False)."""
+    return "가" <= syllable <= "힣" and (ord(syllable) - 0xAC00) % 28 != 0
+
+
+def _subj(noun):
+    return "이" if _has_final(noun[-1]) else "가"
+
+
+def _copula(noun):
+    return noun + ("이다" if _has_final(noun[-1]) else "다")
+
+
+def count_neg(text, lang="ko"):
+    """부정어 수 — ko 는 check_line 의 `_NEG` 그대로, en 은 not · never · no · n't 꼴."""
+    return len((_NEG if lang == "ko" else _NEG_EN).findall(text or ""))
+
+
+def find_neg_slots(text, lang="ko"):
+    """절 끝 서술어마다 부정어를 넣거나 뺀 자리 [{kind: neg, start, end, text, flip, dir, awkward}].
+    find_slots 와 따로 둔다 — find_slots 에 넣으면 옛 씨앗의 자리 고르기가 바뀐다."""
+    found, taken = [], []
+    for pattern, flip, direction, awkward in (_KO_NEG_RULES if lang == "ko" else _EN_NEG_RULES):
+        for m in pattern.finditer(text):
+            if m.start() == m.end() or any(m.start() < e and s < m.end() for s, e in taken):
+                continue
+            new = flip(m)
+            if not new or new == m.group(0):
+                continue
+            taken.append((m.start(), m.end()))
+            found.append({"kind": "neg", "start": m.start(), "end": m.end(), "text": m.group(0), "flip": new,
+                          "dir": direction, "awkward": awkward})
+    return sorted(found, key=lambda s: s["start"])
+
+
 # ---------------------------------------------------------------- 새 값
 
 def _parse_num(text):
@@ -269,6 +344,8 @@ def _shift_date(slot, rng):
 def new_value(slot, seed_text, rng):
     """바꿀 자리의 새 값 — 같은 종류 · 씨앗에 이미 없는 값. 못 정하면 None."""
     kind, text = slot["kind"], slot["text"]
+    if kind == "neg":
+        return slot.get("flip")
     if kind == "num":
         for cand in _num_candidates(slot["num"], slot["unit"], rng):
             if cand != slot["num"] and not has_value(cand, seed_text):
@@ -890,9 +967,10 @@ def check_line(seed, line, role, row, scrubber):
     if n and changed_tokens(seed, line) > token_limit(role, row):
         out.append("tokens")
     new = row.get("new")
+    kind = (row.get("slot") or {}).get("kind")
     if role == "b" and new and not has_value(new, line):
         out.append("new_missing")
-    if role == "b" and new and has_value(new, seed):
+    if role == "b" and new and kind != "neg" and has_value(new, seed):   # neg 의 새 꼴(「한다」)은 씨앗 딴 자리에 있어도 된다
         out.append("new_in_seed")
     if role == "a" and new and a_has_b_value(new, seed, line, (row.get("slot") or {}).get("kind", "num")):
         out.append("a_has_b_value")
@@ -903,7 +981,11 @@ def check_line(seed, line, role, row, scrubber):
         out.append("length")
     if is_question(line):
         out.append("question")
-    if (row.get("slot") or {}).get("kind") not in ("onoff", "bound") and len(_NEG.findall(line)) > len(_NEG.findall(seed)):
+    if kind == "neg":
+        lang = row.get("lang", "ko")
+        if abs(count_neg(line, lang) - count_neg(seed, lang)) != 1:   # neg 는 부정어가 딱 하나 늘거나 줄어야 한다
+            out.append("negation")
+    elif kind not in ("onoff", "bound") and len(_NEG.findall(line)) > len(_NEG.findall(seed)):
         out.append("negation")
     if sum(scrubber.hits({"evidence": line}).values()):
         out.append("scrub")

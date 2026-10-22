@@ -735,6 +735,16 @@ def mine_minicheck(raw, rng, read_rows=None):
 
 # ---------------------------------------------------------------- OOD (WiCE · SufficientFacts · ContractNLI)
 
+def read_contractnli(raw, splits=("dev", "test")):
+    """ContractNLI zip(메모리에서 읽음) → 문서마다 (split, 문서, 조항 글 목록, 가설 표). K8 목표 셋 en 후보도 이걸 쓴다."""
+    with zipfile.ZipFile(os.path.join(raw, "contractnli", "contract-nli.zip")) as archive:
+        for split in splits:
+            data = json.loads(archive.read(f"contract-nli/{split}.json"))
+            for doc in data["documents"]:
+                text = doc["text"]
+                yield split, doc, [" ".join(text[a:b].split()) for a, b in doc["spans"]], data["labels"]
+
+
 def mine_ood(raw, rng, per_source=240):
     col = Collector("ood")
     # WiCE (claim 수준, dev · test)
@@ -772,21 +782,15 @@ def mine_ood(raw, rng, per_source=240):
                     source_label=row["label_after"])
     # ContractNLI (dev · test, zip 을 메모리에서 읽음)
     cnli_hint = {"Entailment": "a", "Contradiction": "b", "NotMentioned": "d"}
-    with zipfile.ZipFile(os.path.join(raw, "contractnli", "contract-nli.zip")) as archive:
-        for split in ("dev", "test"):
-            data = json.loads(archive.read(f"contract-nli/{split}.json"))
-            labels = data["labels"]
-            for doc in data["documents"]:
-                text = doc["text"]
-                spans = [" ".join(text[a:b].split()) for a, b in doc["spans"]]
-                gid = col.group(f"cnli:{split}-{doc['id']}", "heldout", lic="CC-BY-4.0")
-                index = BM25(spans)
-                for key, ann in doc["annotation_sets"][0]["annotations"].items():
-                    hint = cnli_hint[ann["choice"]]
-                    claim = labels[key]["hypothesis"]
-                    picked = ann["spans"] if ann["spans"] else index.rank(claim)[:1]
-                    col.add(join_within([spans[i] for i in picked]), claim, hint, "cnli-" + ann["choice"], [gid],
-                            "en", split, [f"cnli-{split}-{doc['id']}-{key}"], source_label=ann["choice"])
+    for split, doc, spans, labels in read_contractnli(raw):
+        gid = col.group(f"cnli:{split}-{doc['id']}", "heldout", lic="CC-BY-4.0")
+        index = BM25(spans)
+        for key, ann in doc["annotation_sets"][0]["annotations"].items():
+            hint = cnli_hint[ann["choice"]]
+            claim = labels[key]["hypothesis"]
+            picked = ann["spans"] if ann["spans"] else index.rank(claim)[:1]
+            col.add(join_within([spans[i] for i in picked]), claim, hint, "cnli-" + ann["choice"], [gid],
+                    "en", split, [f"cnli-{split}-{doc['id']}-{key}"], source_label=ann["choice"])
     # 원천마다 per_source 로 줄이되 hint 를 고르게
     kept = []
     by_src = collections.defaultdict(lambda: collections.defaultdict(list))

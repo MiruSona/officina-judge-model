@@ -1,0 +1,424 @@
+{
+ "name": "protocol-g10",
+ "design": "비공개 K8 판 설계 「conflict 긴 줄 보강」 (2026-10-22) 2-6 · 4절 · 6절 — 층 train-g10-long · 목표 셋 dev-long-g10 · 목표 b_f1@dev-long-g10 · 반증 문 3-0",
+ "hash_rule": "이 파일 바이트의 sha256 을 모든 결과(eval summary.json · compare · gates · prereg)에 protocol_sha256 으로 적는다. 첫 비교 전에 커밋하고, 고치려면 protocol-g11.json 새 판을 만든다 (이 파일은 첫 비교 뒤 안 고친다). protocol-g1 ~ g9 은 그대로 둔다.",
+ "label_guide": "support-v6",
+ "label_guide_note": "g10 = g9 의 지킴 · 경보 · 씨앗 · 곁 자 · release_gate 를 글자 그대로 두고, 기준 판(K7) · 목표(b_f1 를 긴 줄 목표 셋에서) · 학습 층(+ train-g10-long) · 셋(+ dev-long-g10) · generator_forms(+ long-*) 만 바꾼다 (changes_from_g9)",
+ "changes_from_g9": [
+  "기준 판 : K → K7 (판 규칙 0-2 와 어긋남 — 까닭은 비공개 K8 설계 3-1)",
+  "목표 : macro_f1@ko/nogen ≥ +.03 → b_f1 를 dev-long-g10 전체(ko + en)에서 평균 차 ≥ +.05 · 묶음 붓스트랩 95% 아래끝 > 0 (compare --target-set, 각 판 폴더의 형제 eval-dev-long-g10 pred). g9 목표 macro_f1@ko/nogen 은 보고만",
+  "반증 문 (pair_gate.refute) : K7 의 b_f1@dev-long-g10 이 dev-cmp-g9 b_f1@ko 보다 .10 넘게 낮아야 학습한다 — 기록 칸 · 판정은 사람이",
+  "학습 층 : K7 5층 + train-g10-long (train.recipe · train_sets)",
+  "셋 : + dev-long-g10 (sets)",
+  "generator_forms : + long-* 여덟 꼴",
+  "보고만 셋 : + conflict-synth-28 · conflict-real-50 (sha 만 · 꽂기 조건 plug_gate)",
+  "나머지(지킴 · 경보 · 씨앗 · 곁 자 · release_gate · bootstrap · release_pick)는 g9 와 글자 그대로"
+ ],
+ "seeds": [
+  1,
+  2,
+  3,
+  4,
+  5
+ ],
+ "seeds_note": "protocol-g3 와 같다 — 씨앗 5 · 결정 모드(train_nli --deterministic) · 시작점 runs/base-2/ckpt-best",
+ "seed_rerun": 1,
+ "ckpt": "last",
+ "release_pick": {
+  "rule": "closest_to_mean",
+  "metric": "c_recall",
+  "lang": "ko",
+  "set": "dev-cmp-g9",
+  "tie": "acc3(쌍 전체) 높은 판 · 그다음 씨앗 작은 판"
+ },
+ "bootstrap": {
+  "n": 10000,
+  "ci": 0.95,
+  "rng_seed": 20261011,
+  "resample": "group",
+  "seeds": "고정 — 씨앗은 다시 뽑지 않는다"
+ },
+ "group_key": "group",
+ "majority": "씨앗 중 과반이 맞혀야 맞힘 (맞힌 수 × 2 > 씨앗 수) — McNemar 입력",
+ "calibrate_on": "dev-cal-g3",
+ "compare_on": "dev-cmp-g9",
+ "sets": {
+  "dev-cal-g3": "7f9a2f1d89bbf9f1d38f5d59e252d2388a26d9da54f8b0a49f27dd0490ec2c6c",
+  "dev-cmp-g9": "0cc63a705583aeaa08945dab79fea22f8774304fd74672df2ed7d52a688f9a28",
+  "blind-g4": "c6d796d16a7b240146497871684fad385fec5f120f84bc980aadf335b04fc8dc",
+  "dev-long-g10": "831073970907ae2e7c58079a748109861394def65773562c5cc6baa9d1afa282"
+ },
+ "sets_note": "dev-cal-g3 · dev-cmp-g9 · blind-g4 는 g9 그대로. dev-long-g10 = 목표 셋 658쌍 (ko 479 = Opus 손 주장 · kowiki · 층과 묶음 안 겹침 / en 179 = ContractNLI 본래 라벨 쌍을 v6 로 다시 판정 · b 94 · a 60 · c 25, d 판정 쌍은 뺌). 판정 Opus 둘 + 갈림 셋째 다수결. d 는 ko 12 뿐이라 d 자는 잴 수 없음(n < 30) — 목표 자 b_f1 에는 안 걸린다. 층 · dev-cmp-g9 · blind-g4 · ood-g1 · dev-cal-g3 · K7 처방 층과 묶음 · 근거 글 · 쌍 글 겹침 0 (2026-10-22). 지킴은 compare_on(dev-cmp-g9)으로만 잰다",
+ "report_only_sets": {
+  "ood-g1": "6584a3176e672d1543246b39ca3eef4a411f034298cbfeef905089562880372c",
+  "dev-cmp-g4": "fa2f81cb4226475aebb825d61af8f36efc0be695ef9d32e78427d4ea0b1ae59b",
+  "conflict-synth-28": "f1f13bdce4d9964c70eab9236d623644fce334158f2cfd057e7e4f439ac638b5",
+  "conflict-real-50": "f8b3a46304d51f1fbc2e2b781df8111090d285b90816f3ea09ca5c3113ca810e"
+ },
+ "report_only_sets_note": "dev-cmp-g4 = g8 의 비교 셋. K → K7 을 이 셋 · protocol-g8 로도 한 번 재서 「보고만」 표로 따로 싣는다 (옛 자 결과와 새 자 결과는 한 표에 섞지 않는다 · 사용자 확정 ⑧) · conflict-synth-28 · conflict-real-50 = 꽂기 조건(plug_gate)용 게임 기획 글 셋 (파일은 git 밖 · sha 만, synth-30.h3 · real-50.h3 판) — 출시 판정에 안 쓴다",
+ "generator_forms": [
+  "near-x",
+  "removed",
+  "c-pair",
+  "klue-removed",
+  "klue-ans-removed",
+  "boolq-removed",
+  "wiki-other",
+  "mit-near",
+  "mit-other",
+  "mit-rev",
+  "vitc-same-page",
+  "vitc-near",
+  "vitc-same-doc",
+  "seed-a",
+  "seed-b",
+  "long-num",
+  "long-neg",
+  "long-flip",
+  "long-same",
+  "long-alt",
+  "long-bothneg",
+  "long-other",
+  "long-time"
+ ],
+ "generator_forms_note": "우리 생성기가 짝을 일부러 엇갈려 지은 꼴 이름 (셋 줄의 form 칸). 고른 잣대 : K 처방 층(train-r2 · train-g1-arch · train-g3-ko)에 없고 K7 덧층(train-g4-bal · train-g4-klb)이 생성기(layer_g4c · layer_g4d · layer_g4bal · seed_to_pairs)로 새로 가르치는 꼴 + 그와 같은 짓기를 평가 쪽 make_sets 가 쓴 이름(near-x = BM25 10~60위 다른 묶음 주장 · removed = 답 문장 뺀 KLUE 문단, 학습 쪽 이름 klue-removed). 원천 자료의 짝을 옮긴 꼴(qa-alt · qa-true · unanswerable · labeled · wiki-edit 등)과 K 처방에도 있던 꼴(near · same-doc 등 g1 캐기 꼴 · g3 씨앗 contrast)은 넣지 않는다 — g3 씨앗 contrast 는 VitaminC 원래 짝과 이름이 같아서도 뺐다. pair_gate 자에 drop_forms: generator_forms 를 달면 compare 가 이 꼴의 쌍을 빼고 센다. 지킴은 모든 쌍으로 잰다 · g10 : train-g10-long 의 긴 줄 여덟 꼴(long-*)을 더한다 — dev-cmp-g9 에는 이 꼴이 없어 g9 목표(보고만) 값은 그대로, 이름만 남긴다",
+ "generator_forms_counts": {
+  "dev-cmp-g4": {
+   "near-x": 289,
+   "near-x@ko": 207,
+   "removed": 30,
+   "removed@ko": 30,
+   "others": 0
+  },
+  "dev-cmp-g9": {
+   "near-x": 483,
+   "near-x@ko": 401,
+   "removed": 30,
+   "removed@ko": 30,
+   "others": 0
+  },
+  "k7_layers": {
+   "near-x": 501,
+   "c-pair": 230,
+   "klue-removed": 270,
+   "removed": 22,
+   "klue-ans-removed": 31,
+   "boolq-removed": 58,
+   "wiki-other": 121,
+   "mit-near": 19,
+   "mit-other": 35,
+   "mit-rev": 3,
+   "vitc-same-page": 93,
+   "vitc-near": 57,
+   "vitc-same-doc": 42,
+   "seed-a": 44,
+   "seed-b": 44
+  },
+  "note": "2026-10-18 에 얼린 파일의 form 칸을 센 값 (k7_layers = train-g4-bal + train-g4-klb, K 처방 층 셋에는 이 꼴 0). dev-cmp-g4 ko 쌍 1,341 중 237 이 목표 자에서 빠진다. dev-cmp-g9 는 10-18 d 보충 뒤 다시 얼린 파일을 센 값이다(보충 d 는 wiki-edit 꼴이라 이 수는 그대로) — ko 쌍 2,313 중 431 이 목표 자에서 빠진다(새 묶음 c 는 거의 near-x)"
+ },
+ "train": {
+  "recipe": [
+   "train-r2",
+   "train-g1-arch",
+   "train-g3-ko",
+   "train-g4-bal",
+   "train-g4-klb",
+   "train-g10-long"
+  ],
+  "class_weight_fixed": [
+   0.8646582405778421,
+   0.9994239425532274,
+   0.8340563960214578,
+   1.3018614208474724
+  ],
+  "class_weight_fixed_arg": "--class-weight-fixed 0.8646582405778421,0.9994239425532274,0.8340563960214578,1.3018614208474724",
+  "note": "K8 = K7 처방(씨앗 1~5 · 결정 모드 · 시작점 base-2 · lr 1e-5 · batch 16 · max-len 320 · 4바퀴 · --replay-n 2965 · mix-klue 1:1 · class_weight 고정 g9 값) + train-g10-long. compare · gates 는 이 칸을 안 읽는다 — 학습 입력 대조용"
+ },
+ "train_sets": {
+  "train-g3-ko": "4a1025aa859f4975b01cbce8abd9a4dc747a6c6d55c4a0e015a3b4fc9e92018a",
+  "train-g4-c": "271546a1526422f856fbcf18f9cef208b3ed8be2dce32bdfb8db8cbc8bf3b057",
+  "train-g4-c-h": "191bfb2df63b734fc869f194d7287884d85ea6ff19bda70b83ac1af38005650f",
+  "train-g4-d": "739072b92c9824ffab193c73528bcabcd8efd4fb89ec261bf4ae2dbd647ebfb9",
+  "train-g4-bal": "27729dad0fbeba1edc96d023226171b0fabe4f62e384f21a15967848b42794ca",
+  "train-g4-klb": "12d95aeef6e3f1167d4346b4a4bc565865811ca43bad9fca9f91304744f226cb",
+  "train-g4-bal2": "05e9477344ed97995593710d4d2b3595c24f837894fb4af0ec6f6bdc600721b0",
+  "train-g10-long": "6a1fa7b36639ff9ae32dacdd7bf8805f138f77a0a9615105d1633e9da4610197"
+ },
+ "train_sets_note": "K7 = K5 처방 (train.recipe · class_weight 고정만 다름) · K6 = K 처방 + train-g4-bal2 + train-g4-klb · K5 = K 처방 + train-g4-bal + train-g4-klb · K4 = K 처방 + train-g4-bal (train-g4-bal 은 K4 · K5 재현용으로 둔다 · train-g4-c · -c-h · -d 는 층 재료로만 썼고 학습에 따로 안 넣는다. ~/.judgemodel/sets/g4/train-g4-*.jsonl, FROZEN-*.sha256). 재는 셋이 아니라 compare · gates 는 안 읽는다 — 학습 입력이 바뀌지 않았는지 맞춰 보는 자리. 학습 · 합성 · 덧학습 금지 목록 : sets/g3/blind-g3.forbid.json · sets/g4/blind-g4.forbid.json · K8 = K7 처방 + train-g10-long (~/.judgemodel/sets/g10/train-g10-long.jsonl, FROZEN-train-g10-long.sha256 · 1,131줄)",
+ "side": {
+  "mnli": "mnli-devm2000",
+  "klue": "klue-dev",
+  "k48": "k48"
+ },
+ "pair_gate": {
+  "base": "K7",
+  "base_note": "기준 판은 K7 씨앗 다섯 (dev-cmp-g9 · ckpt last — g9 짝 비교 때 잰 판 그대로) · 목표 셋은 같은 판을 dev-long-g10 으로 새로 잰다",
+  "new": "K8",
+  "slice_note": "lang · domain 칸이 달린 자는 셋 줄의 그 칸이 같은 쌍만으로 센다 (compare.py ruler_name — 이름 c_recall@ko · b_recall@mem·ko)",
+  "target": {
+   "metric": "b_f1",
+   "set": "dev-long-g10",
+   "min_mean_diff": 0.05,
+   "ci_low_gt": 0.0
+  },
+  "target_note": "자 이름 b_f1#dev-long-g10 — compare 가 --target-set 의 쌍으로만 센다(판 폴더의 형제 eval-dev-long-g10). 재현이 아니라 F1 이라 b 남발 판을 막는다. +.05 는 실사용 필요(.75 → .9) 쪽 문턱. ko · en 조각은 곁에 보고만",
+  "guards": [
+   {
+    "metric": "b_f1",
+    "lang": "en",
+    "ci_low_ge": -0.03
+   },
+   {
+    "metric": "b_f1",
+    "ci_low_ge": -0.02
+   },
+   {
+    "metric": "macro_f1",
+    "ci_low_ge": -0.02
+   },
+   {
+    "metric": "a_f1",
+    "ci_low_ge": -0.03
+   },
+   {
+    "metric": "c_f1",
+    "ci_low_ge": -0.03
+   },
+   {
+    "metric": "d_f1",
+    "ci_low_ge": -0.03
+   },
+   {
+    "metric": "false_support",
+    "max_ratio": 1.2
+   },
+   {
+    "metric": "side_acc3",
+    "sides": [
+     "mnli",
+     "klue"
+    ],
+    "min_mean_diff": -0.01
+   },
+   {
+    "metric": "b_f1",
+    "lang": "ko",
+    "ci_low_ge": -0.03
+   },
+   {
+    "metric": "b_recall",
+    "lang": "ko",
+    "ci_low_ge": -0.05
+   },
+   {
+    "metric": "b_recall",
+    "lang": "en",
+    "ci_low_ge": -0.05
+   }
+  ],
+  "guards_note": "g9 지킴 — F1 자(a_f1 · b_f1 · c_f1 · d_f1 · macro_f1)는 묶음 다시 뽑기마다 혼동표(정답 × 예측, 씨앗 합)를 다시 세서 F1 을 새로 센다 · 정밀이 모든 정답 칸에서 오므로 그 조각(lang)에 쌍이 있는 묶음 전부를 뽑는다(compare.f1_bootstrap). 재현 b@ko · b@en −.05 는 b 를 버려 F1 을 올리는 판을 막는 바닥. 같은 처방 5 · 5 A/A(K5 ∪ K6 252가름) 하나라도 깨짐 .008 (g8 지킴 .210) — 목표 ≤ 5%",
+  "min_seeds": 5,
+  "min_seeds_note": "기준 · 새 판 한 쪽이라도 씨앗이 이보다 적으면 compare 가 판정을 거부한다(exit 2). 씨앗 2 · 3 이면 g9 지킴 A/A 헛깨짐 .20~.55",
+  "alarms": [
+   {
+    "metric": "k48_hits",
+    "min": 40
+   },
+   {
+    "metric": "b_recall",
+    "domain": "mem",
+    "lang": "ko",
+    "min_mean_diff": -0.03
+   },
+   {
+    "metric": "a_recall",
+    "lang": "ko",
+    "min_mean_diff": -0.03
+   },
+   {
+    "metric": "d_recall",
+    "lang": "ko",
+    "min_mean_diff": -0.05
+   },
+   {
+    "metric": "c_recall",
+    "lang": "ko",
+    "min_mean_diff": 0.06
+   },
+   {
+    "metric": "d_recall",
+    "lang": "en",
+    "min_mean_diff": -0.05
+   },
+   {
+    "metric": "recalls",
+    "langs": [
+     "",
+     "ko",
+     "en"
+    ],
+    "max_mean_diff": 0.2
+   },
+   {
+    "metric": "pred_shift",
+    "by": "domain",
+    "max_shift": 0.3,
+    "min_n": 20
+   }
+  ],
+  "alarms_note": "g6 새 경보 둘(진단용 · 판정은 안 바꾼다) — recalls : a · b · c · d 재현 × (쌍 전체 · @ko · @en) 중 평균 차 > +.20 (너무 오름, K3 의 d@en +.315). pred_shift : 원천(domain)마다 정답 x 중 y 로 본 몫(x≠y)이 K 대비 +.30 넘게 오름 · 정답 x 가 min_n 쌍 이상인 칸만 (K3 의 VitaminC c→d .95)",
+  "report_only": [
+   "모든 쌍 macro_f1@ko (생성기 꼴 안 뺀 값 — compare metrics 에 목표 곁으로 늘 나옴, 판정 안 바꿈)",
+   "생성기 꼴 뺀 쌍 수 (compare stats.generator_forms · 꼴별)",
+   "use1 잣대 — 잣대 3쌍 b 확률 · 놓친 b 7쌍 · ② c → b (K · K7, rerun.py)",
+   "옛 셋 dev-cmp-g4 · protocol-g8 판정 K → K7 (따로 표 — 새 자 표와 안 섞음, 사용자 확정 ⑧)",
+   "새 묶음만 조각 — dev-cmp-g9 의 ko 새 묶음 쌍만으로 센 자 (옛 dev 쌍 조각과 나란히 · dev 맞춤 몫 보기)",
+   "(원천 × 구간) 분포 — 원천마다 학습 줄의 새 낱말 몫 구간 B0~B5 몫 (K5 층 기준 한 번, 덧층 줄 80% 넘게가 B3 이상이면 사람이 봄)",
+   "구간별 b@ko 재현 · 정밀 — 구간 B0~B5 마다 나란히 (재현을 잃은 B3 · B4 에서 정밀이 오르나)",
+   "새 비공개 원천 보고만 줄 (라벨 판이 끝나 있으면 · dev 에 안 넣음)",
+   "원천 × 꼴 × 칸 줄 수 표 (K5 층 · 결과 문서)",
+   "원천 × 칸 재현 표 (--by domain,lang) · T3 판정 약함 칸 (dev 정답 칸 < 30)",
+   "g8 지킴 자리 재현 a · b · c · d · acc3 (쌍 전체 · @ko · @en — compare metrics 에 늘 나옴, 판정 안 바꿈)",
+   "다시 판정에서 칸이 바뀐 쌍 수 (옛 dev-cmp-g4 v5 → v6)",
+   "목표 셋 조각 — b_f1@ko · b_f1@en #dev-long-g10 (compare 가 목표 곁에 같이 낸다)",
+   "b_recall@long · 꼴별(long-num · long-neg · long-flip) · g9 목표 macro_f1@ko/nogen · K → K8 표"
+  ],
+  "verdicts": {
+   "먹힘": "목표 충족 · 지킴 다 통과",
+   "같다": "목표 못 미침 · 지킴은 통과 → 메인 판단 뒤 사용자 (사용자 확정 ⑦)",
+   "지킴 깨짐": "지킴 하나라도 미달 → 진단(pred.jsonl 혼동표 · 원천 × 칸 · 구간) 뒤 사용자. 대체 판은 적지 않는다. g9 로 두 판 연속 깨지면 v1.2 접음 · 8092 v1.2.0(nli-studio-v10) 유지 (사용자 확정 ⑦)",
+   "보류": "목표 충족인데 지킴 중 잴 수 없는 것이 있음 (곁 자 없음 등)",
+   "판별 불가": "기준선 ko c 씨앗 평균 짝 반폭 > .04 — compare 가 내지 않는다, 메인 판단",
+   "거부": "한 쪽 씨앗 < min_seeds — compare 가 판정을 내지 않는다 (exit 2)"
+  },
+  "refute": {
+   "model": "K7",
+   "metric": "b_f1",
+   "set": "dev-long-g10",
+   "vs": {
+    "metric": "b_f1",
+    "lang": "ko",
+    "set": "dev-cmp-g9"
+   },
+   "min_gap": 0.1
+  },
+  "refute_note": "기록 칸 — 학습 전에 K7 을 목표 셋으로 재서 사람이 판정한다(설계 3-0). compare 는 안 읽는다"
+ },
+ "cell_check": {
+  "dev": "dev-cmp-g9",
+  "thin": 10,
+  "recipe": [
+   "train-r2",
+   "train-g1-arch",
+   "train-g3-ko",
+   "train-g4-bal",
+   "train-g4-klb",
+   "train-g10-long"
+  ],
+  "base_recipe": [
+   "train-r2",
+   "train-g1-arch",
+   "train-g3-ko"
+  ],
+  "max_shift": 0.2,
+  "band_edges": [
+   0.1,
+   0.2,
+   0.35
+  ],
+  "band_min": 100,
+  "weak": 30,
+  "ack": {
+   "file": "cell-ack-g7.json",
+   "sha256": "974d1ebb55954833c82d6dcd0c498c2ae552405c5d7f607cefffe587bc1b6465"
+  },
+  "note": "기록용 — 조립 검사(assemble_g4.py check --recipe · cells)가 쓴 값. 학습 0 · dev ≥ 1 칸이 있으면 얼리지 않는다 · 10줄 미만은 경고. K5 점검표(--base-recipe K) : T1 원천 안 칸 몫 · T2 언어 × 겹침 구간 칸 몫 |차| > max_shift 이면 얼리지 않음(허용 목록 ack 뺌) · T3 dev weak 쌍 미만 칸은 표시만. g9 : dev 는 dev-cmp-g9 (빈칸 검사를 새 dev 로 다시 셈 — 울리면 층은 안 고치고 그 칸을 결과에 「판정 약함」), recipe 는 K7 = K5 처방"
+ },
+ "release_gate": {
+  "set": "blind-g4",
+  "ref_model": "v1.1.0",
+  "ref_model_note": "v1.1.0 = runs/g1-B2-s3/ckpt-best (가중치 sha256 14d0d520…)",
+  "b_recall_min": [
+   {
+    "metric": "b_recall",
+    "min": 0.8
+   },
+   {
+    "metric": "b_recall",
+    "lang": "ko",
+    "min": 0.7
+   }
+  ],
+  "vs_ref": [
+   {
+    "metric": "b_f1",
+    "lang": "ko",
+    "ci_low_gt": 0.0
+   },
+   {
+    "metric": "b_f1",
+    "lang": "en",
+    "ci_low_ge": -0.08
+   },
+   {
+    "metric": "b_f1",
+    "ci_low_ge": -0.07
+   },
+   {
+    "metric": "macro_f1",
+    "ci_low_ge": -0.07
+   },
+   {
+    "metric": "a_f1",
+    "ci_low_ge": -0.08
+   },
+   {
+    "metric": "c_f1",
+    "ci_low_ge": -0.08
+   },
+   {
+    "metric": "d_f1",
+    "ci_low_ge": -0.08
+   },
+   {
+    "metric": "b_recall",
+    "lang": "ko",
+    "ci_low_ge": -0.1
+   },
+   {
+    "metric": "b_recall",
+    "lang": "en",
+    "ci_low_ge": -0.1
+   }
+  ],
+  "sure_false_support_share_max": 0.015,
+  "unsure_vs_ref_max_diff": 0.03,
+  "p95_ms_max": 1000.0,
+  "min_groups": {
+   "b@en": 200,
+   "a": 380,
+   "c": 260,
+   "b@ko": 220
+  },
+  "min_groups_note": "잴 셋에서 gold 칸(글자) · 언어(@lang)별 묶음(group_key) 수의 아래 — 모자라면 assemble_g4 check 가 얼리기를 막고 gates.py release 가 거부한다",
+  "group_cap": {
+   "vitaminc": 2
+  },
+  "group_cap_note": "기록용 — VitaminC 쪽당 b 2 · a 2 (make_sets.G4_GROUP_CAP)",
+  "note": "b_recall_min 은 절대 자 목록 (쌍 전체 b ≥ .80 · ko b ≥ .70) — g8 그대로. vs_ref 는 같은 쌍 차의 묶음 붓스트랩 95% 아래끝 — g9 는 짝 비교 지킴과 같은 F1 자다(2026-10-18, g8 의 재현 · acc3 1:1 자를 갈음). 「안 나빠짐」 여덟 줄은 pair_gate.guards 의 F1 · 재현 바닥 줄을 옮기되 문턱을 각각 .05 씩 넓혔고(guards −.03 · −.02 · −.05 → −.08 · −.07 · −.10, 2026-10-18 결정 — 아래 A/A), 「나아짐」 한 줄은 g8 의 b_recall@ko > 0 을 b_f1@ko > 0 으로 옮겼다. macro_f1@ko 를 「나아짐」으로 쓰지 않은 까닭 : blind-g4 의 ko 에는 정답 d 가 0 이라 macro-F1@ko 가 d 칸 0 · 셀 수 없음으로 흔들린다. 셈은 compare.f1_compare 그대로(기준 v1.1.0 판 하나 · 잴 판 하나 · 씨앗 수가 달라도 혼동표 셈). blind-g4 크기 셈 [어림] : 정답 칸 묶음 수가 dev-cmp-g9 대비 b@ko 250/525 · a 405/610 · c 277/624 · d 119/532 · b@en 212/149 라 반폭이 b@ko 약 1.45배 · c 1.5배 · d 2.1배 · a 1.2배 · b@en 0.84배로 넓어진다. A/A 실측(dev-cmp-g9 · K 씨앗 하나 대 하나 20쌍, 2026-10-18) : 「안 나빠짐」 줄 하나라도 깨짐 17/20 = .85 (b_f1@en 9 · d_f1 9 · b_recall@en 7 · b_f1 6 · a_f1 4 · c_f1 4 · macro_f1 0 · b_recall@ko 0), 여유를 모두 δ 넓히면 .01 → 15 · .02 → 9 · .03 → 6 · .04 → 2 · .05 → 0. 비공개 조사 E6 3절(dev-cmp-g4 · 1:1 · 같은 여유 .600)과 같은 쪽이다 — 씨앗 하나 대 하나는 묶음 붓스트랩에 안 든 씨앗 흔들림이 커서, 이 여유 그대로면 같은 처방끼리도 대부분 깨진다. 2026-10-18 결정 : 출시 관문은 씨앗 1:1 이라 짝 관문(씨앗 5)보다 여유를 .05 넓힌다 — 같은 dev A/A 에서 깨짐 0/20 (이 A/A 는 d 보충 전 3,203쌍 판에서 잼). blind-g4 는 묶음이 적어(위 반폭 어림) 같은 0/20 을 내려면 더 넓어야 할 수 있다 — 미실측 (gates.py 는 문턱만 읽으므로 이 칸만 고치면 된다)",
+  "unsure_vs_ref_max_diff_note": "보류 차(잴 판 보류 ≤ 기준 모델 보류 + .03, 둘 다 제 calibration 문턱)는 문턱 · 확신 자라 F1 과 따로 잰다 — g8 그대로",
+  "reuse_note": "blind-g4 두 번째 사용 — 미리 정한 한 판 · prereg 뒤 한 번 (mem 20261011-06158b8f 선례)"
+ },
+ "plug_gate": {
+  "conflict-synth-28": {
+   "metric": "b_recall",
+   "min": 0.9
+  },
+  "conflict-real-50": {
+   "metric": "warn_false_rate",
+   "max": 0.1
+  },
+  "pairs_200_seconds_max": 300,
+  "note": "8092 교체 조건 (사용자 결정 10-19 통과선) — 출시 판정 아님 · 고른 판 하나로 한 번만 잰다. gates · compare 는 안 읽는다"
+ }
+}
